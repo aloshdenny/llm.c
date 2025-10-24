@@ -7,6 +7,9 @@ Fused Classifier:
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels

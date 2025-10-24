@@ -5,6 +5,9 @@ AdamW kernel
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels
@@ -34,16 +37,47 @@ __device__ void adamw_update(Tp* params_memory, float* master_params_memory, Tg*
     v_memory[idx] = v;
     m /= beta1_correction;  // m_hat
     v /= beta2_correction;  // v_hat
-    // fetch the old value of this parameter as a float, from either source
-    float old_param = (master_params_memory != NULL) ? master_params_memory[idx] : (float)params_memory[idx];
+    
+    // fetch the old value of this parameter as a float
+    float old_param;
+#ifdef ENABLE_Q115
+    // In Q1.15 mode, Tp is int16_t (q115_t)
+    if constexpr (sizeof(Tp) == 2) {
+        // Convert from Q1.15 to float
+        old_param = q115_to_float(params_memory[idx]);
+        // Use master weights if available (for higher precision accumulation)
+        if (master_params_memory != NULL) {
+            old_param = master_params_memory[idx];
+        }
+    } else {
+        old_param = (master_params_memory != NULL) ? master_params_memory[idx] : (float)params_memory[idx];
+    }
+#else
+    old_param = (master_params_memory != NULL) ? master_params_memory[idx] : (float)params_memory[idx];
+#endif
+    
     // update this parameter
     float param = old_param - (learning_rate * (m / (sqrtf(v) + eps) + weight_decay * old_param));
-    // update our low precision version of the parameters using stochastic rounding
-    // this will be used in the next forward pass
+    
+    // Store updated parameter
+#ifdef ENABLE_Q115
+    if constexpr (sizeof(Tp) == 2) {
+        // Convert from float to Q1.15
+        params_memory[idx] = float_to_q115(param);
+    } else {
+        // use stochastic rounding for non-Q1.15 types
+        stochastic_rounding(param, &params_memory[idx], seed);
+    }
+#else
+    // use stochastic rounding to go from float to lower precision
     stochastic_rounding(param, &params_memory[idx], seed);
+#endif
+    
     // write the full, float version of the param into our master copy, if we maintain one
     // this will be used in the next update
-    if (master_params_memory != NULL) { master_params_memory[idx] = param; }
+    if (master_params_memory != NULL) { 
+        master_params_memory[idx] = param; 
+    }
 }
 
 template <typename Tp, typename Tg>

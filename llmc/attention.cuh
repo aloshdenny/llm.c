@@ -6,6 +6,9 @@ Attention, as a fallback when we do not use the Flash Attention from cuDNN
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
 #include "cublas_common.h"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels

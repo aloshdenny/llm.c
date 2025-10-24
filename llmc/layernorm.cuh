@@ -13,6 +13,9 @@ E.g., the layernorms are connected to the residuals so we += in layernorm backwa
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels
@@ -60,7 +63,12 @@ __global__ void layernorm_forward_kernel3(floatX* __restrict__ out, float* __res
         // indicating that this data will not be reused soon, and can be streamed through the caches
         // this allows the threads to get more cache-hits for the (shared) weight and bias parameters
         float n = s * ((float)__ldcs(x+c) - m);
-        __stcs(o+c, (floatX)(n * (float)weight[c] + (float)bias[c]));
+        float result = n * (float)weight[c] + (float)bias[c];
+#ifdef ENABLE_Q115
+        __stcs(o+c, float_to_q115(result));
+#else
+        __stcs(o+c, (floatX)result);
+#endif
     }
 }
 

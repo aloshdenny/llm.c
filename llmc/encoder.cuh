@@ -12,6 +12,9 @@ In the backward pass, the gradients flow to both, handled by different kernels
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels
@@ -37,9 +40,21 @@ __global__ void encoder_forward_kernel3(floatX* out,
     x128 packed_out;
     x128 wte128 = load128cs(wte_ix);
     x128 wpe128 = load128cs(wpe_tc);
+    
+#ifdef ENABLE_Q115
+    // Q1.15 mode: add using Q1.15 arithmetic
+    for (int k = 0; k < x128::size; k++) {
+        q115_t wte_val = wte128[k];
+        q115_t wpe_val = wpe128[k];
+        packed_out[k] = q115_add(wte_val, wpe_val);
+    }
+#else
+    // Float/BF16 mode: standard floating point addition
     for (int k = 0; k < x128::size; k++) {
         packed_out[k] = (floatX)((float)wte128[k] + (float)wpe128[k]);
     }
+#endif
+    
     store128(out_btc, packed_out);
 }
 

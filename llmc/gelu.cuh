@@ -5,6 +5,9 @@
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // CUDA kernels
@@ -18,7 +21,12 @@ __global__ void gelu_forward_kernel2(floatX* out, const floatX* inp) {
     for(int k = 0; k < packed_inp.size; ++k) {
         float xi = (float)packed_inp[k];
         float cube = 0.044715f * xi * xi * xi;
-        packed_out[k] = (floatX)(0.5f * xi * (1.0f + tanhf(GELU_SCALING_FACTOR * (xi + cube))));
+        float result = 0.5f * xi * (1.0f + tanhf(GELU_SCALING_FACTOR * (xi + cube)));
+#ifdef ENABLE_Q115
+        packed_out[k] = float_to_q115(result);
+#else
+        packed_out[k] = (floatX)result;
+#endif
     }
     // store instead of storecs (without cache streaming) in case it is useful for the
     // data to be in the cache for the next operation after this GeLU

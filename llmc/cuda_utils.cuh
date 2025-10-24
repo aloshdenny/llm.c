@@ -84,7 +84,7 @@ typedef Packed128<floatX> x128;
 
 // enumerator to indentify the datatype of a tensor.
 enum class DType : uint8_t {
-    FP32, FP16, BF16
+    FP32, FP16, BF16, Q115
 };
 
 // Given a datatype enum, returns the underlying number of bytes
@@ -97,6 +97,8 @@ size_t sizeof_dtype(DType type) {
             return sizeof(half);
         case DType::BF16:
             return sizeof(nv_bfloat16);
+        case DType::Q115:
+            return sizeof(int16_t);
         default: // handle or get compiler warning
             fprintf(stderr, "Unknown datatype\n");
             exit(EXIT_FAILURE);
@@ -106,6 +108,7 @@ size_t sizeof_dtype(DType type) {
 DType dtype_of(float* f) { return DType::FP32; }
 DType dtype_of(nv_bfloat16 * f) { return DType::BF16; }
 DType dtype_of(half * f) { return DType::FP16; }
+DType dtype_of(int16_t * f) { return DType::Q115; }
 
 
 
@@ -130,6 +133,23 @@ template<>
 __device__ float cast_value<float, __nv_bfloat16>(__nv_bfloat16 val) {
     return __bfloat162float(val);
 }
+
+#ifdef ENABLE_Q115
+template<>
+__device__ float cast_value<float, int16_t>(int16_t val) {
+    // Q1.15 to float conversion
+    return __int2float_rn(val) / 32768.0f;
+}
+
+template<>
+__device__ int16_t cast_value<int16_t, float>(float val) {
+    // Float to Q1.15 conversion with clamping
+    val = fmaxf(-0.999f, fminf(0.999f, val));
+    float scaled = val * 32768.0f;
+    int32_t rounded = __float2int_rn(scaled);
+    return (int16_t)max(-32768, min(32767, rounded));
+}
+#endif
 
 template<typename Td, typename Ts>
 __global__ void copy_and_cast_kernel(Td* dst, const Ts* src, size_t n, ptrdiff_t stride_dst, ptrdiff_t stride_src) {

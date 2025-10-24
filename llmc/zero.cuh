@@ -29,6 +29,9 @@ Utilities for ZeRO sharding
 const ncclDataType_t ncclFloatX = ncclFloat;
 #elif defined(ENABLE_FP16)
 const ncclDataType_t ncclFloatX = ncclHalf;
+#elif defined(ENABLE_Q115)
+// Q1.15 uses int16, but we'll need to handle it as short for NCCL
+const ncclDataType_t ncclFloatX = ncclInt16;
 #else // Default to bfloat16
 const ncclDataType_t ncclFloatX = ncclBfloat16;
 #endif
