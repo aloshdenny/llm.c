@@ -4,6 +4,9 @@
 #define CUDA_UTILS_CUH
 
 #include "cuda_common.h"
+#ifdef ENABLE_Q115
+#include "q115_common.cuh"
+#endif
 
 // ----------------------------------------------------------------------------
 // Packed128 data structure that forces the compiler to use 128-bit loads/stores
@@ -302,5 +305,11 @@ __device__ __forceinline__ void stochastic_rounding(float in, half *out, unsigne
 __device__ __forceinline__ void stochastic_rounding(float in, float *out, unsigned int random) {
     *out = in; // dummy function for when floatX is float (FP32 mode)
 }
+#ifdef ENABLE_Q115
+__device__ __forceinline__ void stochastic_rounding(float in, int16_t *out, unsigned int seed) {
+    // For Q1.15 mode, use deterministic rounding via float_to_q115
+    *out = float_to_q115(in);
+}
+#endif
 
 #endif

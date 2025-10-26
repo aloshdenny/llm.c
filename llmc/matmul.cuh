@@ -9,6 +9,24 @@ Matrix Multiplication, with help from cuBLASLt
 #include "cublas_common.h"
 // GELU can be either fused (cublasLt) or non-fused (gelu.h)
 #include "gelu.cuh"
+
+// Define missing cuBLASLt constants that might not be in older CUDA versions
+#ifndef CUBLASLT_EPILOGUE_DGELU
+#define CUBLASLT_EPILOGUE_DGELU (cublasLtEpilogue_t)(64 | 128)
+#endif
+
+#ifndef CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE
+#define CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE (cublasLtMatmulDescAttributes_t)26
+#endif
+
+// Define missing cuBLASLt constants that might not be in older CUDA versions
+#ifndef CUBLASLT_EPILOGUE_DGELU
+#define CUBLASLT_EPILOGUE_DGELU (cublasLtEpilogue_t)(64 | 128)
+#endif
+
+#ifndef CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE
+#define CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE 26
+#endif
 #ifdef ENABLE_Q115
 #include "q115_common.cuh"
 #endif
