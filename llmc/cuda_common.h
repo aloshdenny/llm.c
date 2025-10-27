@@ -110,17 +110,34 @@ typedef __nv_bfloat16 floatX;
 // If not, you easily get "no viable overload" (for sm52) and "function already exists" (sm_80)
 
 #if defined(ENABLE_BF16) && (__CUDACC_VER_MAJOR__ < 12) && !((__CUDA_ARCH__ >= 800) || !defined(__CUDA_ARCH__))
-__device__ floatX __ldcs(const floatX *address)
-{
-    unsigned short bf = __ldcs(reinterpret_cast<const unsigned short *>(address));
-    return __nv_bfloat16_raw{bf};
+__device__ __nv_bfloat16 __ldcs(const __nv_bfloat16* address) {
+    __nv_bfloat16_raw raw;
+    raw.x = __ldcs(reinterpret_cast<const unsigned short*>(address));
+    return __nv_bfloat16(raw);
 }
 
-__device__ void __stcs(floatX *address, floatX value)
-{
-    __stcs(reinterpret_cast<unsigned short *>(address), ((__nv_bfloat16_raw)value).x);
+__device__ void __stcs(__nv_bfloat16* address, __nv_bfloat16 value) {
+    __nv_bfloat16_raw raw = value;
+    __stcs(reinterpret_cast<unsigned short*>(address), raw.x);
 }
 #endif
+
+// Generic fallbacks for __ldcs and __stcs for types where the compiler
+// doesn't provide streaming cache intrinsics. We provide templated
+// wrappers that simply perform a normal load/store. If the compiler or
+// CUDA runtime provides a non-template overload for a specific type
+// (for example __nv_bfloat16 on some toolchains), that overload will be
+// preferred over these templates due to overload resolution rules.
+template<typename T>
+__device__ __forceinline__ T __ldcs(const T* address) {
+    return *address;
+}
+
+template<typename T>
+__device__ __forceinline__ void __stcs(T* address, T value) {
+    *address = value;
+}
+
 
 // ----------------------------------------------------------------------------
 // Profiler utils
