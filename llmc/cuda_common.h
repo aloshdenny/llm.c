@@ -8,7 +8,7 @@ Common utilities for CUDA code.
 #include <stdio.h>
 #include <math.h>
 #include <string>
-#include <type_traits>      // std::bool_constant
+#include <type_traits> // std::bool_constant
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h>
 #include <nvtx3/nvToolsExtCudaRt.h>
@@ -39,7 +39,7 @@ extern cudaDeviceProp deviceProp;
 #endif
 
 // convenience macro for calculating grid/block dimensions for kernels
-#define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
+#define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 
 // short-cuts for compile-time boolean values that can be used as function arguments
 constexpr std::bool_constant<true> True;
@@ -49,19 +49,23 @@ constexpr std::bool_constant<true> False;
 // Error checking
 
 // CUDA error checking. Underscore added so this function can be called directly not just via macro
-inline void cudaCheck_(cudaError_t error, const char *file, int line) {
-  if (error != cudaSuccess) {
-    printf("[CUDA ERROR] at file %s:%d:\n%s\n", file, line, cudaGetErrorString(error));
-    exit(EXIT_FAILURE);
-  }
+inline void cudaCheck_(cudaError_t error, const char *file, int line)
+{
+    if (error != cudaSuccess)
+    {
+        printf("[CUDA ERROR] at file %s:%d:\n%s\n", file, line, cudaGetErrorString(error));
+        exit(EXIT_FAILURE);
+    }
 };
 #define cudaCheck(err) (cudaCheck_(err, __FILE__, __LINE__))
 
 // like cudaFree, but checks for errors _and_ resets the pointer.
-template<class T>
-inline void cudaFreeCheck(T** ptr, const char *file, int line) {
+template <class T>
+inline void cudaFreeCheck(T **ptr, const char *file, int line)
+{
     cudaError_t error = cudaFree(*ptr);
-    if (error != cudaSuccess) {
+    if (error != cudaSuccess)
+    {
         printf("[CUDA ERROR] at file %s:%d:\n%s\n", file, line, cudaGetErrorString(error));
         exit(EXIT_FAILURE);
     }
@@ -72,7 +76,8 @@ inline void cudaFreeCheck(T** ptr, const char *file, int line) {
 // ----------------------------------------------------------------------------
 // CUDA Precision settings and defines
 
-enum PrecisionMode {
+enum PrecisionMode
+{
     PRECISION_FP32,
     PRECISION_FP16,
     PRECISION_BF16,
@@ -90,7 +95,7 @@ typedef half floatX;
 #elif defined(ENABLE_Q115)
 // Q1.15 fixed-point mode
 #include <stdint.h>
-typedef int16_t floatX;  // Q1.15 represented as int16_t
+typedef int16_t floatX; // Q1.15 represented as int16_t
 #define PRECISION_MODE PRECISION_Q115
 #else // Default to bfloat16
 typedef __nv_bfloat16 floatX;
@@ -105,23 +110,27 @@ typedef __nv_bfloat16 floatX;
 // If not, you easily get "no viable overload" (for sm52) and "function already exists" (sm_80)
 
 #if defined(ENABLE_BF16) && (__CUDACC_VER_MAJOR__ < 12) && !((__CUDA_ARCH__ >= 800) || !defined(__CUDA_ARCH__))
-__device__ floatX __ldcs(const floatX* address) {
-    unsigned short bf = __ldcs(reinterpret_cast<const unsigned short*>(address));
+__device__ floatX __ldcs(const floatX *address)
+{
+    unsigned short bf = __ldcs(reinterpret_cast<const unsigned short *>(address));
     return __nv_bfloat16_raw{bf};
 }
 
-__device__ void __stcs(floatX* address, floatX value) {
-    __stcs(reinterpret_cast<unsigned short*>(address), ((__nv_bfloat16_raw)value).x);
+__device__ void __stcs(floatX *address, floatX value)
+{
+    __stcs(reinterpret_cast<unsigned short *>(address), ((__nv_bfloat16_raw)value).x);
 }
 #endif
 
 // ----------------------------------------------------------------------------
 // Profiler utils
 
-class NvtxRange {
- public:
-    NvtxRange(const char* s) { nvtxRangePush(s); }
-    NvtxRange(const std::string& base_str, int number) {
+class NvtxRange
+{
+public:
+    NvtxRange(const char *s) { nvtxRangePush(s); }
+    NvtxRange(const std::string &base_str, int number)
+    {
         std::string range_string = base_str + " " + std::to_string(number);
         nvtxRangePush(range_string.c_str());
     }
@@ -133,16 +142,17 @@ class NvtxRange {
 // Utilities to Read & Write between CUDA memory <-> files
 
 // copy num_bytes from device pointer src into file dest, using double buffering running on the given stream.
-inline void device_to_file(FILE* dest, void* src, size_t num_bytes, size_t buffer_size, cudaStream_t stream) {
+inline void device_to_file(FILE *dest, void *src, size_t num_bytes, size_t buffer_size, cudaStream_t stream)
+{
     // allocate pinned buffer for faster, async transfer
-    char* buffer_space;
-    cudaCheck(cudaMallocHost(&buffer_space, 2*buffer_size));
+    char *buffer_space;
+    cudaCheck(cudaMallocHost(&buffer_space, 2 * buffer_size));
     // split allocation in two
-    void* read_buffer = buffer_space;
-    void* write_buffer = buffer_space + buffer_size;
+    void *read_buffer = buffer_space;
+    void *write_buffer = buffer_space + buffer_size;
 
     // prime the read buffer; first copy means we have to wait
-    char* gpu_read_ptr = (char*)src;
+    char *gpu_read_ptr = (char *)src;
     size_t copy_amount = std::min(buffer_size, num_bytes);
     cudaCheck(cudaMemcpyAsync(read_buffer, gpu_read_ptr, copy_amount, cudaMemcpyDeviceToHost, stream));
     cudaCheck(cudaStreamSynchronize(stream));
@@ -152,13 +162,14 @@ inline void device_to_file(FILE* dest, void* src, size_t num_bytes, size_t buffe
 
     std::swap(read_buffer, write_buffer);
     // now the main loop; as long as there are bytes left
-    while(rest_bytes > 0) {
+    while (rest_bytes > 0)
+    {
         // initiate next read
         copy_amount = std::min(buffer_size, rest_bytes);
         cudaCheck(cudaMemcpyAsync(read_buffer, gpu_read_ptr, copy_amount, cudaMemcpyDeviceToHost, stream));
         // while this is going on, transfer the write buffer to disk
         fwriteCheck(write_buffer, 1, write_buffer_size, dest);
-        cudaCheck(cudaStreamSynchronize(stream));     // wait for both buffers to be ready.
+        cudaCheck(cudaStreamSynchronize(stream)); // wait for both buffers to be ready.
 
         std::swap(read_buffer, write_buffer);
         rest_bytes -= copy_amount;
@@ -172,18 +183,19 @@ inline void device_to_file(FILE* dest, void* src, size_t num_bytes, size_t buffe
 }
 
 // copy num_bytes from file src into device pointer dest, using double buffering running on the given stream.
-inline void file_to_device(void* dest, FILE* src, size_t num_bytes, size_t buffer_size, cudaStream_t stream) {
-     // allocate pinned buffer for faster, async transfer
-     // from the docs (https://developer.download.nvidia.com/compute/DevZone/docs/html/C/doc/html/group__CUDART__HIGHLEVEL_ge439496de696b166ba457dab5dd4f356.html)
-     // WC memory is a good option for buffers that will be written by the CPU and read by the device via mapped pinned memory or host->device transfers.
-    char* buffer_space;
-    cudaCheck(cudaMallocHost(&buffer_space, 2*buffer_size, cudaHostAllocWriteCombined));
+inline void file_to_device(void *dest, FILE *src, size_t num_bytes, size_t buffer_size, cudaStream_t stream)
+{
+    // allocate pinned buffer for faster, async transfer
+    // from the docs (https://developer.download.nvidia.com/compute/DevZone/docs/html/C/doc/html/group__CUDART__HIGHLEVEL_ge439496de696b166ba457dab5dd4f356.html)
+    // WC memory is a good option for buffers that will be written by the CPU and read by the device via mapped pinned memory or host->device transfers.
+    char *buffer_space;
+    cudaCheck(cudaMallocHost(&buffer_space, 2 * buffer_size, cudaHostAllocWriteCombined));
     // split allocation in two
-    void* read_buffer = buffer_space;
-    void* write_buffer = buffer_space + buffer_size;
+    void *read_buffer = buffer_space;
+    void *write_buffer = buffer_space + buffer_size;
 
     // prime the read buffer;
-    char* gpu_write_ptr = (char*)dest;
+    char *gpu_write_ptr = (char *)dest;
     size_t copy_amount = std::min(buffer_size, num_bytes);
     freadCheck(read_buffer, 1, copy_amount, src);
 
@@ -192,14 +204,15 @@ inline void file_to_device(void* dest, FILE* src, size_t num_bytes, size_t buffe
     std::swap(read_buffer, write_buffer);
 
     // now the main loop; as long as there are bytes left
-    while(rest_bytes > 0) {
+    while (rest_bytes > 0)
+    {
         // initiate next read
         copy_amount = std::min(buffer_size, rest_bytes);
         cudaCheck(cudaMemcpyAsync(gpu_write_ptr, write_buffer, write_buffer_size, cudaMemcpyHostToDevice, stream));
         gpu_write_ptr += write_buffer_size;
         // while this is going on, read from disk
         freadCheck(read_buffer, 1, copy_amount, src);
-        cudaCheck(cudaStreamSynchronize(stream));     // wait for both buffers to be ready.
+        cudaCheck(cudaStreamSynchronize(stream)); // wait for both buffers to be ready.
 
         std::swap(read_buffer, write_buffer);
         rest_bytes -= copy_amount;

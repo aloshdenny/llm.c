@@ -137,12 +137,12 @@ ifeq ($(USE_CUDNN), 1)
       else
         $(error ✗ cuDNN not found. See the README for install instructions and the Makefile for hard-coded paths)
       endif
-      CUDNN_INCLUDE_PATH ?= -I"C:\Program Files\NVIDIA\CUDNN\v9.1\include\12.4"
+      CUDNN_INCLUDE_PATH ?= -I"C:\Program Files\NVIDIA\CUDNN\v9.14\include\13.0"
       CUDNN_FRONTEND_PATH += $(CUDNN_INCLUDE_PATH)
       NVCC_FLAGS += --std c++20 -Xcompiler "/std:c++20" -Xcompiler "/EHsc /W0 /nologo /Ox /FS" -maxrregcount=0 --machine 64
       NVCC_CUDNN = $(BUILD_DIR)\cudnn_att.obj
       NVCC_INCLUDES += -I$(CUDNN_FRONTEND_PATH)
-      NVCC_LDFLAGS += -L"C:\Program Files\NVIDIA\CUDNN\v9.1\lib\12.4\x64" -lcudnn
+      NVCC_LDFLAGS += -L"C:\Program Files\NVIDIA\CUDNN\v9.14\lib\13.0\x64" -lcudnn
       NVCC_FLAGS += -DENABLE_CUDNN
     endif
   endif
