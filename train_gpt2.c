@@ -89,14 +89,16 @@ static inline q115_t q115_add(q115_t a, q115_t b) {
     return (q115_t)result;
 }
 
-// Bulk conversion functions
+// Bulk conversion functions with OpenMP parallelization
 void float_array_to_q115(q115_t* dst, const float* src, size_t n) {
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) {
         dst[i] = float_to_q115(src[i]);
     }
 }
 
 void q115_array_to_float(float* dst, const q115_t* src, size_t n) {
+    #pragma omp parallel for
     for (size_t i = 0; i < n; i++) {
         dst[i] = q115_to_float(src[i]);
     }
@@ -113,6 +115,7 @@ void encoder_forward(q115_t* out,
     // inp is (B,T) of integers, holding the token ids at each (b,t) position
     // wte is (V,C) of token embeddings, short for "weight token embeddings"
     // wpe is (maxT,C) of position embeddings, short for "weight positional embedding"
+    #pragma omp parallel for collapse(2)
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             // seek to the output position in out[b,t,:]
@@ -159,6 +162,7 @@ void layernorm_forward(q115_t* out, float* mean, float* rstd,
     // at each position (b,t) of the input, the C-dimensional vector
     // of activations gets normalized, then scaled and shifted
     float eps = 1e-5f;
+    #pragma omp parallel for collapse(2)
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             // seek to the input position inp[b,t,:]
@@ -281,6 +285,15 @@ void matmul_forward(q115_t* out,
     // then we can tile the inner loop, and reuse the loaded weight LOOP_UNROLL many times
     #pragma omp parallel for
     for (int obt = 0; obt < B * T; obt += LOOP_UNROLL) {
+        // Pre-convert input slice to float to reduce conversion overhead
+        float inp_cache[LOOP_UNROLL * C];
+        for (int ibt = 0; ibt < LOOP_UNROLL; ibt++) {
+            int bt = obt + ibt;
+            for (int i = 0; i < C; i++) {
+                inp_cache[ibt * C + i] = q115_to_float(inp[bt * C + i]);
+            }
+        }
+        
         for (int o = 0; o < OC; o++) {
             // we'll keep LOOP_UNROLL many results in float for precision
             float result[LOOP_UNROLL];
@@ -294,8 +307,7 @@ void matmul_forward(q115_t* out,
             for (int i = 0; i < C; i++) {
                 float w = q115_to_float(weight[i + o * C]);
                 for (int ibt = 0; ibt < LOOP_UNROLL; ibt++) {
-                    int bt = obt + ibt;
-                    result[ibt] += q115_to_float(inp[bt * C + i]) * w;
+                    result[ibt] += inp_cache[ibt * C + i] * w;
                 }
             }
             // write back results to main memory, converting back to Q1.15
@@ -490,6 +502,7 @@ void attention_backward(float* dinp, float* dpreatt, float* datt,
 void gelu_forward(q115_t* out, q115_t* inp, int N) {
     // (approximate) GeLU elementwise non-linearity in the MLP block of Transformer
     // Compute in float for accuracy, convert back to Q1.15
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         float x = q115_to_float(inp[i]);
         float cube = 0.044715f * x * x * x;
@@ -519,6 +532,7 @@ void gelu_backward(float* dinp, q115_t* inp, float* dout, int N) {
 #pragma float_control(pop)
 
 void residual_forward(q115_t* out, q115_t* inp1, q115_t* inp2, int N) {
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         out[i] = q115_add(inp1[i], inp2[i]);
     }
