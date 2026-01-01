@@ -51,7 +51,16 @@ def write_datafile(filename, toks, model_desc="gpt-2"):
     header[1] = info["version"]
     header[2] = len(toks) # number of tokens after the 256*4 bytes of header
     # construct the data (numpy array of tokens)
-    toks_np = np.array(toks, dtype=info["token_dtype"])
+    # Accept both numpy arrays and lists for backward compatibility
+    if isinstance(toks, np.ndarray):
+        # If already a numpy array with correct dtype, use it directly
+        if toks.dtype == info["token_dtype"]:
+            toks_np = toks
+        else:
+            toks_np = toks.astype(info["token_dtype"])
+    else:
+        # Convert list to numpy array
+        toks_np = np.array(toks, dtype=info["token_dtype"])
     # write to file
     num_bytes = (256 * 4) + (len(toks) * toks_np.itemsize)
     print(f"writing {len(toks):,} tokens to {filename} ({num_bytes:,} bytes) in the {model_desc} format")

@@ -56,19 +56,25 @@ local_dir, remote_name = directories[(args.type, args.version)]
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
-# download the dataset
+# download the dataset with streaming to avoid loading everything into memory
 if args.type == "classic":
-    fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train")
+    fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train", streaming=True)
     name = "fineweb"
 elif args.type =="edu":
-    fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
+    fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train", streaming=True)
     name = "edu_fineweb"
+
+# Initialize tokenizers globally to avoid recreating them in each process
+llama_tokenizer = None
+gpt2_encoder = None
 
 def tokenize_llama(doc):
     # tokenizes a single document and returns a numpy array of uint32 tokens
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
-    encode = lambda s: tokenizer.encode(s, add_special_tokens=False, verbose=False, split_special_tokens=True)
-    eot = tokenizer.encode('')[0] # by default the tokenizer adds the EOT token (128000)
+    global llama_tokenizer
+    if llama_tokenizer is None:
+        llama_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+    encode = lambda s: llama_tokenizer.encode(s, add_special_tokens=False, verbose=False, split_special_tokens=True)
+    eot = llama_tokenizer.encode('')[0] # by default the tokenizer adds the EOT token (128000)
     tokens = [eot] # the special <|endoftext|> token delimits all documents
     tokens.extend(encode(doc["text"]))
     tokens_np = np.array(tokens)
@@ -78,9 +84,11 @@ def tokenize_llama(doc):
 
 def tokenize_gpt2(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
-    enc = tiktoken.get_encoding("gpt2")
-    encode = lambda s: enc.encode_ordinary(s)
-    eot = enc._special_tokens['<|endoftext|>'] # end of text token
+    global gpt2_encoder
+    if gpt2_encoder is None:
+        gpt2_encoder = tiktoken.get_encoding("gpt2")
+    encode = lambda s: gpt2_encoder.encode_ordinary(s)
+    eot = gpt2_encoder._special_tokens['<|endoftext|>'] # end of text token
     tokens = [eot] # the special <|endoftext|> token delimits all documents
     tokens.extend(encode(doc["text"]))
     tokens_np = np.array(tokens)
@@ -93,51 +101,52 @@ token_dtype = {
     "llama-3": np.uint32
 }[args.model_desc]
 
-# tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
-nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
-with mp.Pool(nprocs) as pool:
-    shard_index = 0
-    # preallocate buffer to hold current shard
-    all_tokens_np = np.empty((args.shard_size,), dtype=token_dtype)
-    token_count = 0
-    progress_bar = None
+if __name__ == '__main__':
+    # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
+    nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
+    with mp.Pool(nprocs) as pool:
+        shard_index = 0
+        # preallocate buffer to hold current shard
+        all_tokens_np = np.empty((args.shard_size,), dtype=token_dtype)
+        token_count = 0
+        progress_bar = None
 
-    tokenize = lambda x: None
-    if args.model_desc == "gpt-2":
-        tokenize = tokenize_gpt2
-    elif args.model_desc == "llama-3":
-        tokenize = tokenize_llama
-    else:
-        raise ValueError(f"unknown model {args.model_desc}")
-
-    for tokens in pool.imap(tokenize, fw, chunksize=16):
-
-        # is there enough space in the current shard for the new tokens?
-        if token_count + len(tokens) < args.shard_size:
-            # simply append tokens to current shard
-            all_tokens_np[token_count:token_count+len(tokens)] = tokens
-            token_count += len(tokens)
-            # update progress bar
-            if progress_bar is None:
-                progress_bar = tqdm(total=args.shard_size, unit="tokens", desc=f"Shard {shard_index}")
-            progress_bar.update(len(tokens))
+        tokenize = lambda x: None
+        if args.model_desc == "gpt-2":
+            tokenize = tokenize_gpt2
+        elif args.model_desc == "llama-3":
+            tokenize = tokenize_llama
         else:
-            # write the current shard and start a new one
+            raise ValueError(f"unknown model {args.model_desc}")
+
+        for tokens in pool.imap(tokenize, fw, chunksize=16):
+
+            # is there enough space in the current shard for the new tokens?
+            if token_count + len(tokens) < args.shard_size:
+                # simply append tokens to current shard
+                all_tokens_np[token_count:token_count+len(tokens)] = tokens
+                token_count += len(tokens)
+                # update progress bar
+                if progress_bar is None:
+                    progress_bar = tqdm(total=args.shard_size, unit="tokens", desc=f"Shard {shard_index}")
+                progress_bar.update(len(tokens))
+            else:
+                # write the current shard and start a new one
+                split = "val" if shard_index == 0 else "train"
+                filename = os.path.join(DATA_CACHE_DIR, f"{name}_{split}_{shard_index:06d}.bin")
+                # split the document into whatever fits in this shard; the remainder goes to next one
+                remainder = args.shard_size - token_count
+                progress_bar.update(remainder)
+                all_tokens_np[token_count:token_count+remainder] = tokens[:remainder]
+                write_datafile(filename, all_tokens_np, args.model_desc)
+                shard_index += 1
+                progress_bar = None
+                # populate the next shard with the leftovers of the current doc
+                all_tokens_np[0:len(tokens)-remainder] = tokens[remainder:]
+                token_count = len(tokens)-remainder
+
+        # write any remaining tokens as the last shard
+        if token_count != 0:
             split = "val" if shard_index == 0 else "train"
             filename = os.path.join(DATA_CACHE_DIR, f"{name}_{split}_{shard_index:06d}.bin")
-            # split the document into whatever fits in this shard; the remainder goes to next one
-            remainder = args.shard_size - token_count
-            progress_bar.update(remainder)
-            all_tokens_np[token_count:token_count+remainder] = tokens[:remainder]
-            write_datafile(filename, all_tokens_np.tolist(), args.model_desc)
-            shard_index += 1
-            progress_bar = None
-            # populate the next shard with the leftovers of the current doc
-            all_tokens_np[0:len(tokens)-remainder] = tokens[remainder:]
-            token_count = len(tokens)-remainder
-
-    # write any remaining tokens as the last shard
-    if token_count != 0:
-        split = "val" if shard_index == 0 else "train"
-        filename = os.path.join(DATA_CACHE_DIR, f"{name}_{split}_{shard_index:06d}.bin")
-        write_datafile(filename, (all_tokens_np[:token_count]).tolist(), args.model_desc)
+            write_datafile(filename, all_tokens_np[:token_count], args.model_desc)

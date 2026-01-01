@@ -4,7 +4,9 @@
 #define CUDA_UTILS_CUH
 
 #include "cuda_common.h"
-#ifdef ENABLE_Q115
+#if defined(ENABLE_Q131)
+#include "q131_common.cuh"
+#elif defined(ENABLE_Q115)
 #include "q115_common.cuh"
 #endif
 
@@ -87,7 +89,7 @@ typedef Packed128<floatX> x128;
 
 // enumerator to indentify the datatype of a tensor.
 enum class DType : uint8_t {
-    FP32, FP16, BF16, Q115
+    FP32, FP16, BF16, Q115, Q131
 };
 
 // Given a datatype enum, returns the underlying number of bytes
@@ -102,6 +104,8 @@ size_t sizeof_dtype(DType type) {
             return sizeof(nv_bfloat16);
         case DType::Q115:
             return sizeof(int16_t);
+        case DType::Q131:
+            return sizeof(int32_t);
         default: // handle or get compiler warning
             fprintf(stderr, "Unknown datatype\n");
             exit(EXIT_FAILURE);
@@ -112,6 +116,7 @@ DType dtype_of(float* f) { return DType::FP32; }
 DType dtype_of(nv_bfloat16 * f) { return DType::BF16; }
 DType dtype_of(half * f) { return DType::FP16; }
 DType dtype_of(int16_t * f) { return DType::Q115; }
+DType dtype_of(int32_t * f) { return DType::Q131; }
 
 
 
@@ -151,6 +156,23 @@ __device__ int16_t cast_value<int16_t, float>(float val) {
     float scaled = val * 32768.0f;
     int32_t rounded = __float2int_rn(scaled);
     return (int16_t)max(-32768, min(32767, rounded));
+}
+#endif
+
+#ifdef ENABLE_Q131
+template<>
+__device__ float cast_value<float, int32_t>(int32_t val) {
+    // Q1.31 to float conversion
+    return (float)val / 2147483648.0f;
+}
+
+template<>
+__device__ int32_t cast_value<int32_t, float>(float val) {
+    // Float to Q1.31 conversion with clamping
+    val = fmaxf(-0.99999999f, fminf(0.99999999f, val));
+    double scaled = (double)val * 2147483648.0;
+    int64_t rounded = llrintf(scaled);
+    return (int32_t)max((int64_t)(-2147483647 - 1), min((int64_t)2147483647, rounded));
 }
 #endif
 
@@ -240,7 +262,22 @@ int cudaMallocConditionallyManaged(void** out, size_t bytes, const char *file, i
         // if we OOM, fallback to a managed allocation. slower but at least won't crash.
         cudaGetLastError(); // reset the error before the next API call
         cudaCheck_(cudaMallocManaged(out, bytes), file, line);
-        cudaCheck_(cudaMemAdvise(*out, bytes, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId), file, line);
+        // In CUDA 12+, cudaMemAdvise takes cudaMemLocation struct
+        // Use the preprocessor to handle both old and new API
+        #if CUDART_VERSION >= 12000
+            cudaMemLocation loc;
+            memset(&loc, 0, sizeof(loc));
+            loc.type = cudaMemLocationTypeHost;
+            loc.id = 0;
+            cudaMemAccessDesc accessDesc;
+            memset(&accessDesc, 0, sizeof(accessDesc));
+            accessDesc.location = loc;
+            accessDesc.flags = cudaMemAccessFlagsProtReadWrite;
+            // For CUDA 12+, we just skip the advise as it's optional and the API changed
+            // The managed memory will still work, just potentially slower
+        #else
+            cudaCheck_(cudaMemAdvise(*out, bytes, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId), file, line);
+        #endif
         return 1;
     } else {
         cudaCheck_(err, file, line);
@@ -309,6 +346,12 @@ __device__ __forceinline__ void stochastic_rounding(float in, float *out, unsign
 __device__ __forceinline__ void stochastic_rounding(float in, int16_t *out, unsigned int seed) {
     // For Q1.15 mode, use deterministic rounding via float_to_q115
     *out = float_to_q115(in);
+}
+#endif
+#ifdef ENABLE_Q131
+__device__ __forceinline__ void stochastic_rounding(float in, int32_t *out, unsigned int seed) {
+    // For Q1.31 mode, use deterministic rounding via float_to_q131
+    *out = float_to_q131(in);
 }
 #endif
 

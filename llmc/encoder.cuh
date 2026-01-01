@@ -12,7 +12,9 @@ In the backward pass, the gradients flow to both, handled by different kernels
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
-#ifdef ENABLE_Q115
+#if defined(ENABLE_Q131)
+#include "q131_common.cuh"
+#elif defined(ENABLE_Q115)
 #include "q115_common.cuh"
 #endif
 

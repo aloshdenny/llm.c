@@ -7,15 +7,33 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
-// implementation of dirent for Windows is in dev/unistd.h
-#ifndef _WIN32
-#include <dirent.h>
-#include <arpa/inet.h>
+
+#ifdef _WIN32
+    // Prevent winsock.h from being included via windows.h
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef _WINSOCKAPI_
+        #define _WINSOCKAPI_
+    #endif
+    #include <windows.h>
+    #include <io.h>
+    #include <direct.h>
+    #include <sys/stat.h>
+    // mkdir compatibility
+    #define mkdir(dir, mode) _mkdir(dir)
+    // stat compatibility
+    #ifndef stat
+        #define stat _stat
+    #endif
+#else
+    #include <unistd.h>
+    #include <sys/stat.h>
+    #include <dirent.h>
+    #include <arpa/inet.h>
 #endif
 
 // ----------------------------------------------------------------------------
@@ -75,6 +93,8 @@ extern inline void fclose_check(FILE *fp, const char *file, int line) {
 
 #define fcloseCheck(fp) fclose_check(fp, __FILE__, __LINE__)
 
+#ifndef _WIN32
+// Socket close function - only available on POSIX systems
 extern inline void sclose_check(int sockfd, const char *file, int line) {
     if (close(sockfd) != 0) {
         fprintf(stderr, "Error: Failed to close socket at %s:%d\n", file, line);
@@ -86,19 +106,6 @@ extern inline void sclose_check(int sockfd, const char *file, int line) {
 }
 
 #define scloseCheck(sockfd) sclose_check(sockfd, __FILE__, __LINE__)
-
-#ifdef _WIN32
-extern inline void closesocket_check(int sockfd, const char *file, int line) {
-    if (closesocket(sockfd) != 0) {
-        fprintf(stderr, "Error: Failed to close socket at %s:%d\n", file, line);
-        fprintf(stderr, "Error details:\n");
-        fprintf(stderr, "  File: %s\n", file);
-        fprintf(stderr, "  Line: %d\n", line);
-        exit(EXIT_FAILURE);
-    }
-}
-
-#define closesocketCheck(sockfd) closesocket_check(sockfd, __FILE__, __LINE__)
 #endif
 
 extern inline void fseek_check(FILE *fp, long off, int whence, const char *file, int line) {
@@ -192,6 +199,29 @@ extern inline void create_dir_if_not_exists(const char *dir) {
 extern inline int find_max_step(const char* output_log_dir) {
     // find the DONE file in the log dir with highest step count
     if (output_log_dir == NULL) { return -1; }
+#ifdef _WIN32
+    // Windows implementation using FindFirstFile/FindNextFile
+    WIN32_FIND_DATAA find_data;
+    char search_path[MAX_PATH];
+    snprintf(search_path, sizeof(search_path), "%s\\DONE_*", output_log_dir);
+    
+    int max_step = -1;
+    HANDLE hFind = FindFirstFileA(search_path, &find_data);
+    if (hFind == INVALID_HANDLE_VALUE) { return -1; }
+    
+    do {
+        if (strncmp(find_data.cFileName, "DONE_", 5) == 0) {
+            int step = atoi(find_data.cFileName + 5);
+            if (step > max_step) {
+                max_step = step;
+            }
+        }
+    } while (FindNextFileA(hFind, &find_data) != 0);
+    
+    FindClose(hFind);
+    return max_step;
+#else
+    // POSIX implementation using dirent
     DIR* dir;
     struct dirent* entry;
     int max_step = -1;
@@ -207,6 +237,7 @@ extern inline int find_max_step(const char* output_log_dir) {
     }
     closedir(dir);
     return max_step;
+#endif
 }
 
 extern inline int ends_with_bin(const char* str) {

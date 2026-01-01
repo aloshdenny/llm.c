@@ -18,9 +18,92 @@ Implements:
 #include "rand.h"
 
 // ----------------------------------------------------------------------------
-// implementation of glob for Windows is in dev/unistd.h
-#ifndef _WIN32
-#include <glob.h>
+// implementation of glob for Windows
+#ifdef _WIN32
+    // Windows glob implementation
+    typedef struct {
+        size_t gl_pathc;    // Count of paths matched
+        char **gl_pathv;    // List of matched pathnames
+    } glob_t;
+
+    static int glob(const char *pattern, int flags, void *errfunc, glob_t *pglob) {
+        (void)flags; (void)errfunc;
+        WIN32_FIND_DATAA find_data;
+        HANDLE hFind;
+        char **pathv = NULL;
+        size_t pathc = 0;
+        size_t pathv_capacity = 16;
+
+        // Extract directory from pattern
+        char dir_path[MAX_PATH] = "";
+        const char *last_slash = strrchr(pattern, '/');
+        const char *last_backslash = strrchr(pattern, '\\');
+        const char *last_sep = (last_slash > last_backslash) ? last_slash : last_backslash;
+        size_t dir_len = 0;
+        if (last_sep) {
+            dir_len = last_sep - pattern + 1;
+            strncpy(dir_path, pattern, dir_len);
+            dir_path[dir_len] = '\0';
+        }
+
+        pathv = (char**)malloc(pathv_capacity * sizeof(char*));
+        if (!pathv) return -1;
+
+        hFind = FindFirstFileA(pattern, &find_data);
+        if (hFind == INVALID_HANDLE_VALUE) {
+            free(pathv);
+            pglob->gl_pathc = 0;
+            pglob->gl_pathv = NULL;
+            return -1;
+        }
+
+        do {
+            if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                // Resize array if needed
+                if (pathc >= pathv_capacity) {
+                    pathv_capacity *= 2;
+                    char **new_pathv = (char**)realloc(pathv, pathv_capacity * sizeof(char*));
+                    if (!new_pathv) {
+                        for (size_t i = 0; i < pathc; i++) free(pathv[i]);
+                        free(pathv);
+                        FindClose(hFind);
+                        return -1;
+                    }
+                    pathv = new_pathv;
+                }
+                // Allocate and copy full path
+                size_t full_len = dir_len + strlen(find_data.cFileName) + 1;
+                pathv[pathc] = (char*)malloc(full_len);
+                if (!pathv[pathc]) {
+                    for (size_t i = 0; i < pathc; i++) free(pathv[i]);
+                    free(pathv);
+                    FindClose(hFind);
+                    return -1;
+                }
+                snprintf(pathv[pathc], full_len, "%s%s", dir_path, find_data.cFileName);
+                pathc++;
+            }
+        } while (FindNextFileA(hFind, &find_data) != 0);
+
+        FindClose(hFind);
+
+        pglob->gl_pathc = pathc;
+        pglob->gl_pathv = pathv;
+        return (pathc > 0) ? 0 : -1;
+    }
+
+    static void globfree(glob_t *pglob) {
+        if (pglob->gl_pathv) {
+            for (size_t i = 0; i < pglob->gl_pathc; i++) {
+                free(pglob->gl_pathv[i]);
+            }
+            free(pglob->gl_pathv);
+        }
+        pglob->gl_pathc = 0;
+        pglob->gl_pathv = NULL;
+    }
+#else
+    #include <glob.h>
 #endif
 // ----------------------------------------------------------------------------
 // Distributed Data Loader

@@ -1,7 +1,30 @@
 /*
 GPT-2 Transformer Neural Net training loop. See README.md for usage.
 */
-#include <unistd.h>
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef _WINSOCKAPI_
+        #define _WINSOCKAPI_
+    #endif
+    #include <windows.h>
+    #include <io.h>
+    #include <direct.h>
+    // access() and F_OK for Windows
+    #define access _access
+    #ifndef F_OK
+        #define F_OK 0
+    #endif
+    #ifndef R_OK
+        #define R_OK 4
+    #endif
+    #ifndef W_OK
+        #define W_OK 2
+    #endif
+#else
+    #include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -427,6 +450,58 @@ void gpt2_allocate_state(GPT2 *model, int B, int T) {
     printf0(" -> estimated maximum batch size: %zu\n", B + free / bytes_per_sequence);
 }
 
+void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_layers, int num_heads, int channels) {
+    // Initialize model with random Q1.15 weights (similar to train_gpt2.c)
+    printf0("Initializing model with random Q1.15 weights\n");
+    
+    // Set up model configuration
+    model->config.max_seq_len = max_seq_len;
+    model->config.vocab_size = vocab_size;
+    model->config.num_layers = num_layers;
+    model->config.num_heads = num_heads;
+    model->config.channels = channels;
+    model->config.padded_vocab_size = vocab_size;
+    while (model->config.padded_vocab_size % 128 != 0) {
+        model->config.padded_vocab_size++;
+    }
+    
+    // Allocate memory for parameters
+    gpt2_allocate_weights(model);
+    
+    // Initialize with small random values in Q1.15 format
+    // For Q1.15: scale initialization to prevent overflow, values closer to zero
+    // Using scaled initialization: range approximately [-0.1, 0.1] to be safe
+    uint64_t seed = 12345;
+    float init_scale = 0.1f; // Conservative scale for Q1.15
+    
+    // Allocate CPU memory for initialization
+    floatX* params_memory_cpu = (floatX*)mallocCheck(model->num_parameters_bytes);
+    
+    for (size_t i = 0; i < model->num_parameters; i++) {
+        // Simple random number generation (xorshift)
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        float random_val = (((seed * 0x2545F4914F6CDD1Dull) >> 32) / (float)UINT32_MAX) * 2.0f - 1.0f;
+        random_val *= init_scale; // Scale to [-0.1, 0.1]
+        
+        #if PRECISION_MODE == PRECISION_FP32
+            params_memory_cpu[i] = random_val;
+        #elif PRECISION_MODE == PRECISION_BF16
+            params_memory_cpu[i] = (floatX)random_val;
+        #else
+            params_memory_cpu[i] = (floatX)random_val;
+        #endif
+    }
+    
+    // Copy initialized parameters to GPU
+    cudaCheck(cudaMemcpy(model->params_memory, params_memory_cpu, model->num_parameters_bytes, cudaMemcpyHostToDevice));
+    cudaCheck(cudaDeviceSynchronize());
+    
+    // Free CPU memory
+    free(params_memory_cpu);
+}
+
 void gpt2_write_to_checkpoint(GPT2 *model, const char* checkpoint_path) {
     // write the model to a checkpoint file
     printf0("Writing model to %s\n", checkpoint_path);
@@ -465,18 +540,51 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
         exit(EXIT_FAILURE);
     }
 
+    // Check if checkpoint file exists
+    if (access(checkpoint_path, F_OK) == -1) {
+        printf0("Checkpoint file not found: %s\n", checkpoint_path);
+        printf0("Falling back to random Q1.15 initialization with default GPT-2 124M hyperparameters\n");
+        gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+        return;
+    }
+
     // read in model from a checkpoint file
-    FILE *model_file = fopenCheck(checkpoint_path, "rb");
+    FILE *model_file = fopen(checkpoint_path, "rb");
+    if (model_file == NULL) {
+        printf0("Error opening checkpoint file: %s\n", checkpoint_path);
+        printf0("Falling back to random Q1.15 initialization with default GPT-2 124M hyperparameters\n");
+        gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+        return;
+    }
+    
     int model_header[256];
-    freadCheck(model_header, sizeof(int), 256, model_file);
-    if (model_header[0] != 20240326) { printf("Bad magic model file\n"); exit(EXIT_FAILURE); }
+    size_t read_count = fread(model_header, sizeof(int), 256, model_file);
+    if (read_count != 256) {
+        printf0("Error reading model header from: %s\n", checkpoint_path);
+        fclose(model_file);
+        printf0("Falling back to random Q1.15 initialization\n");
+        gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+        return;
+    }
+    
+    if (model_header[0] != 20240326) {
+        printf0("Bad magic model file: %s\n", checkpoint_path);
+        fclose(model_file);
+        printf0("Falling back to random Q1.15 initialization\n");
+        gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+        return;
+    }
+    
     int version = model_header[1];
     if (!(version == 3 || version == 5)) {
         // 3 = fp32, padded vocab
         // 5 = bf16, padded vocab, layernorms also in bf16
-        fprintf(stderr, "Bad version in model file\n");
+        fprintf(stderr, "Bad version in model file: %d\n", version);
         fprintf(stderr, "---> HINT: try to re-run `python train_gpt2.py`\n");
-        exit(EXIT_FAILURE);
+        fclose(model_file);
+        printf0("Falling back to random Q1.15 initialization\n");
+        gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+        return;
     }
 
     // check if the precision mode of the checkpoing matches the model precision
@@ -1077,7 +1185,14 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
         // in particular this also decays the embedding weights, but this is ok:
         // - the token embeddings are weight shared and participate in the final projection to logits
         // - the position embeddings actively participate at every forward/backward pass
+#if defined(ENABLE_Q131) || defined(ENABLE_Q115)
+        // For Q1.15/Q1.31 mode: exclude wte(0), attprojw(6), fcprojw(12) from weight decay
+        // This prevents amplitude collapse which contributes to the ~7.x loss wall
+        // Only apply weight decay to: wpe(1), qkvw(4), fcw(10)
+        float wd = (i == 1 || i == 4 || i == 10) ? weight_decay : 0.0f;
+#else
         float wd = (i == 0 || i == 1 || i == 4 || i == 6 || i == 10 || i == 12) ? weight_decay : 0.0f;
+#endif
         floatX* param_ptr = (floatX*)model->params_memory + local_offset_full;
         floatX* grad_ptr = (floatX*)model->grads_memory + local_offset_full;
 
@@ -1364,6 +1479,8 @@ void delete_checkpoint(const char* output_log_dir, int step, MultiGpuConfig* mul
 
 void error_usage() {
     fprintf(stderr, "Usage:   ./train_gpt2cu [options]\n");
+    fprintf(stderr, "         ./train_gpt2q115cu [options]  (Q1.15 fixed-point training)\n");
+    fprintf(stderr, "         ./train_gpt2q131cu [options]  (Q1.31 fixed-point training)\n");
     fprintf(stderr, "Options:\n");
     // file system input / output
     fprintf(stderr, "  -i <string> train data filename pattern (default = dev/data/tinyshakespeare/tiny_shakespeare_train.bin)\n");
@@ -1385,7 +1502,8 @@ void error_usage() {
     fprintf(stderr, "  -k <string> learning rate scheduler (default = cosine)\n");
     fprintf(stderr, "  -l <float>  learning rate (default = 3e-4f)\n");
     fprintf(stderr, "  -u <int>    learning rate warmup iterations (default = 0, no warmup)\n");
-    fprintf(stderr, "  -q <float>  learning rate decay: final fraction, at end of training (default = 1.0 (no decay))\n");
+    fprintf(stderr, "  -q <int|float> quantization mode (115=Q1.15, 131=Q1.31) or LR decay fraction (default = 1.0)\n");
+    fprintf(stderr, "               When used for quantization, verifies the binary was compiled with that mode.\n");
     fprintf(stderr, "  -c <float>  weight decay (default = 0.0f)\n");
     fprintf(stderr, "  -sl <float> outlier stability: skip update if loss goes above this in zscore (0.0f=off)\n");
     fprintf(stderr, "  -sg <float> outlier stability: skip update if grad_norm goes above this in zscore (0.0f=off)\n");
@@ -1411,6 +1529,9 @@ void error_usage() {
     fprintf(stderr, "  -pm <string> nccl_init_method: tcp,fs,mpi (default = mpi)\n");
     fprintf(stderr, "  -ps <string> server_ip - used only when nccl_init_method is tcp (default = -1)\n");
     fprintf(stderr, "  -pp <string> fs_path - used only when nccl_init_method is fs (default = /tmp)\n");
+    fprintf(stderr, "\nQuantization modes (compile-time selection via make targets):\n");
+    fprintf(stderr, "  make q115   Build train_gpt2q115cu with Q1.15 fixed-point (16-bit)\n");
+    fprintf(stderr, "  make q131   Build train_gpt2q131cu with Q1.31 fixed-point (32-bit, higher precision)\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1418,8 +1539,8 @@ void error_usage() {
 // main training loop
 int main(int argc, char *argv[]) {
     // read in the (optional) command line arguments
-    const char* train_data_pattern = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
-    const char* val_data_pattern = "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
+    const char* train_data_pattern = "dev/data/fineweb10B/fineweb_train_*.bin";
+    const char* val_data_pattern = "dev/data/fineweb10B/fineweb_val_*.bin";
     const char* load_filename = "gpt2_124M_bf16.bin"; // bf16 weights of the model
     const char* lr_scheduler_type = "cosine";
     const char* output_log_dir = NULL;
@@ -1449,6 +1570,7 @@ int main(int argc, char *argv[]) {
     int recompute = 1; // recompute during backward setting, 0 = none, 1 = recompute gelu
     int zero_stage = 0; // Zero Optimization Stage for Multi-GPU training
     int hellaswag_eval = 0;
+    int requested_quant_mode = 0; // 0=none specified, 115=Q1.15, 131=Q1.31
     // multi-node settings
     int num_processes = 1;  // this should be set by the slurm environment
     int process_rank = 0;  // this should be set by the slurm environment
@@ -1473,7 +1595,15 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'l' && argv[i][2] == '\0') { learning_rate = atof(argv[i+1]); }
         else if (argv[i][1] == 'l' && argv[i][2] == 'g') { log_gpu_every = atoi(argv[i+1]); }
         else if (argv[i][1] == 'u') { warmup_iterations = atoi(argv[i+1]); }
-        else if (argv[i][1] == 'q') { final_learning_rate_frac = atof(argv[i+1]); }
+        else if (argv[i][1] == 'q') {
+            // -q can be either quantization mode (115, 131) or LR decay fraction (0.0-1.0)
+            int qval = atoi(argv[i+1]);
+            if (qval == 115 || qval == 131) {
+                requested_quant_mode = qval;
+            } else {
+                final_learning_rate_frac = atof(argv[i+1]);
+            }
+        }
         else if (argv[i][1] == 'c') { weight_decay = atof(argv[i+1]); }
         else if (argv[i][1] == 'x') { max_steps = atoi(argv[i+1]); }
         else if (argv[i][1] == 'v') { val_loss_every = atoi(argv[i+1]); }
@@ -1499,6 +1629,30 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'n' && argv[i][2] == 'k') { checkpoints_keep = atoi(argv[i+1]); }
         else if (argv[i][1] == 'n' && argv[i][2] == 'm') { major_checkpoint_every = atoi(argv[i+1]); }
         else { error_usage(); }
+    }
+
+    // Validate quantization mode if requested via -q 115 or -q 131
+    if (requested_quant_mode != 0) {
+        int compiled_mode = 0;
+#if defined(ENABLE_Q131)
+        compiled_mode = 131;
+#elif defined(ENABLE_Q115)
+        compiled_mode = 115;
+#endif
+        if (compiled_mode == 0) {
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled without quantization.\n", 
+                    requested_quant_mode == 115 ? 15 : 31);
+            fprintf(stderr, "       Use 'make q115' for Q1.15 or 'make q131' for Q1.31 builds.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (compiled_mode != requested_quant_mode) {
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled with Q1.%d.\n",
+                    requested_quant_mode == 115 ? 15 : 31,
+                    compiled_mode == 115 ? 15 : 31);
+            fprintf(stderr, "       Use the correct binary: train_gpt2q%dcu\n", requested_quant_mode);
+            exit(EXIT_FAILURE);
+        }
+        printf("Quantization mode Q1.%d verified.\n", requested_quant_mode == 115 ? 15 : 31);
     }
 
     multi_gpu_config = multi_gpu_config_init(num_processes, process_rank, gpus_per_node, server_ip, fs_path, nccl_init_method);
@@ -1550,7 +1704,9 @@ int main(int argc, char *argv[]) {
     printf0("+-----------------------+----------------------------------------------------+\n");
     const char* precision_str = (PRECISION_MODE == PRECISION_FP32)
                               ? (cublas_compute == CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : "FP32")
-                              : (PRECISION_MODE == PRECISION_FP16 ? "FP16" : "BF16");
+                              : (PRECISION_MODE == PRECISION_FP16 ? "FP16" 
+                                : (PRECISION_MODE == PRECISION_Q115 ? "Q1.15"
+                                  : (PRECISION_MODE == PRECISION_Q131 ? "Q1.31" : "BF16")));
     printf0("| device                | %-50s |\n", deviceProp.name);
     printf0("| peak TFlops           | %-50.1f |\n", get_flops_promised(deviceProp.name, PRECISION_MODE));
     printf0("| precision             | %-50s |\n", precision_str);
@@ -1847,7 +2003,15 @@ int main(int argc, char *argv[]) {
             printf0("skipping update due to grad z-score of %f\n", zgrad);
         } else {
             // clip the gradient norm to a maximum value
+#if defined(ENABLE_Q131)
+            // Slightly lower grad clip for Q1.31 (has more precision, but still fixed-point)
+            float grad_clip = 0.75f;
+#elif defined(ENABLE_Q115)
+            // Lower grad clip for Q1.15 to prevent large updates that can destabilize training
+            float grad_clip = 0.5f;
+#else
             float grad_clip = 1.0f;
+#endif
             float grad_scale = (grad_norm > grad_clip) ? grad_clip / grad_norm : 1.0f;
             gpt2_update(&model, step_learning_rate, 0.9f, 0.95f, 1e-8f, weight_decay, grad_scale, step+1, &multi_gpu_config);
         }

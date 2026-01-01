@@ -8,6 +8,11 @@ Implements various learning rate schedulers.
 #include <math.h>
 #include <string.h>
 
+// M_PI is not defined by default on MSVC
+#ifndef M_PI
+    #define M_PI 3.14159265358979323846
+#endif
+
 typedef struct {
     const char* type;
     float learning_rate;

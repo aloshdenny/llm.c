@@ -27,7 +27,9 @@ Matrix Multiplication, with help from cuBLASLt
 #ifndef CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE
 #define CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE 26
 #endif
-#ifdef ENABLE_Q115
+#if defined(ENABLE_Q131)
+#include "q131_common.cuh"
+#elif defined(ENABLE_Q115)
 #include "q115_common.cuh"
 #endif
 

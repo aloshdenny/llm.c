@@ -81,8 +81,14 @@ enum PrecisionMode
     PRECISION_FP32,
     PRECISION_FP16,
     PRECISION_BF16,
-    PRECISION_Q115
+    PRECISION_Q115,
+    PRECISION_Q131
 };
+
+// Unified fixed-point mode flag - set when any fixed-point format is enabled
+#if defined(ENABLE_Q115) || defined(ENABLE_Q131)
+#define ENABLE_FIXED_POINT 1
+#endif
 
 // Specific configurations based on the enabled precision
 #if defined(ENABLE_FP32)
@@ -92,6 +98,15 @@ typedef float floatX;
 #elif defined(ENABLE_FP16)
 typedef half floatX;
 #define PRECISION_MODE PRECISION_FP16
+#elif defined(ENABLE_Q131)
+// Q1.31 fixed-point mode (32-bit, higher precision than Q1.15)
+#include <stdint.h>
+typedef int32_t floatX; // Q1.31 represented as int32_t
+#define PRECISION_MODE PRECISION_Q131
+// Also define ENABLE_Q115 for code paths that use Q1.15 API (compatibility mode)
+#ifndef ENABLE_Q115
+#define ENABLE_Q115 1
+#endif
 #elif defined(ENABLE_Q115)
 // Q1.15 fixed-point mode
 #include <stdint.h>
@@ -101,7 +116,6 @@ typedef int16_t floatX; // Q1.15 represented as int16_t
 typedef __nv_bfloat16 floatX;
 #define PRECISION_MODE PRECISION_BF16
 #endif
-
 // ----------------------------------------------------------------------------
 // Load and store with streaming cache hints
 // Older nvcc does not provide __ldcs and __stcs for bfloat16, despite these

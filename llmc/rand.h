@@ -85,6 +85,11 @@ Both output:
 
 #include <math.h>
 
+// M_PI is not defined by default on MSVC
+#ifndef M_PI
+    #define M_PI 3.14159265358979323846
+#endif
+
 #define MERSENNE_STATE_M 397u
 #define MERSENNE_STATE_N 624u
 

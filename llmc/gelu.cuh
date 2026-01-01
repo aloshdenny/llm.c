@@ -5,8 +5,15 @@
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
-#ifdef ENABLE_Q115
+#if defined(ENABLE_Q131)
+#include "q131_common.cuh"
+#elif defined(ENABLE_Q115)
 #include "q115_common.cuh"
+#endif
+
+// M_PI is not defined by default on MSVC
+#ifndef M_PI
+    #define M_PI 3.14159265358979323846
 #endif
 
 // ----------------------------------------------------------------------------
