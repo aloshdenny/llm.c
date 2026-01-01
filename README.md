@@ -93,26 +93,6 @@ writing 305,260 tokens to ./dev/data/tinyshakespeare/tiny_shakespeare_train.bin
 
 The .bin files contain a short header (1024 bytes) and then a stream of tokens in uint16, indicating the token ids with the GPT-2 tokenizer. More datasets are available in `/dev/data`.
 
-## test
-
-I am also attaching a simple unit test for making sure our C code agrees with the PyTorch code. On the CPU as an example, compile and run with:
-
-```bash
-make test_gpt2
-./test_gpt2
-```
-
-This now loads the `gpt2_124M_debug_state.bin` file that gets written by train_gpt2.py, runs a forward pass, compares the logits and loss with the PyTorch reference implementation, then it does 10 iterations of training with Adam and makes sure the losses match PyTorch. To test the GPU version we run:
-
-```bash
-# fp32 test (cudnn not supported)
-make test_gpt2cu PRECISION=FP32 && ./test_gpt2cu
-# mixed precision cudnn test
-make test_gpt2cu USE_CUDNN=1 && ./test_gpt2cu
-```
-
-This tests both the fp32 path and the mixed precision path. The test should pass and print `overall okay: 1`.
-
 ## tutorial
 
 I attached a very small tutorial here, in [doc/layernorm/layernorm.md](doc/layernorm/layernorm.md). It's a simple, step-by-step guide to implementing a single layer of the GPT-2 model, the layernorm layer. This is a good starting point to understand how the layers are implemented in C.
@@ -148,6 +128,10 @@ and then:
 
 ```bash
 make train_gpt2cu
+./train_gpt2cu -b 16 -t 1024 -x 10000
+```
+or if running on multiple GPUs
+```
 mpirun -np <number of GPUs> ./train_gpt2cu
 ```
 
