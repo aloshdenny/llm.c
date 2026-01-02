@@ -7,9 +7,7 @@ Global norm, used in gradient clipping
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
-#if defined(ENABLE_Q131)
-#include "q131_common.cuh"
-#elif defined(ENABLE_Q115)
+#if defined(ENABLE_Q115)
 #include "q115_common.cuh"
 #endif
 

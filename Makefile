@@ -96,13 +96,11 @@ TARGETS = train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu train_gpt2fp32cu test_gp
 
 # Quantized training targets
 TARGETS_Q115 = train_gpt2q115cu
-TARGETS_Q131 = train_gpt2q131cu
 
-.PHONY: all clean q115 q131
+.PHONY: all clean q115
 all: $(TARGETS)
 
 q115: $(TARGETS_Q115)
-q131: $(TARGETS_Q131)
 
 # ===============================
 # CPU targets
@@ -135,13 +133,10 @@ profile_gpt2cu: profile_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -lineinfo $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
 
 # ===============================
-# Quantized CUDA targets (Q1.15 and Q1.31 fixed-point)
+# Quantized CUDA targets (Q1.15)
 # ===============================
 train_gpt2q115cu: train_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
-
-train_gpt2q131cu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q131 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
 
 # ===============================
 # Clean

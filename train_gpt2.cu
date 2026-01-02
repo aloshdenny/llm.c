@@ -1185,8 +1185,8 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
         // in particular this also decays the embedding weights, but this is ok:
         // - the token embeddings are weight shared and participate in the final projection to logits
         // - the position embeddings actively participate at every forward/backward pass
-#if defined(ENABLE_Q131) || defined(ENABLE_Q115)
-        // For Q1.15/Q1.31 mode: exclude wte(0), attprojw(6), fcprojw(12) from weight decay
+#if defined(ENABLE_Q115)
+        // For Q1.15 mode: exclude wte(0), attprojw(6), fcprojw(12) from weight decay
         // This prevents amplitude collapse which contributes to the ~7.x loss wall
         // Only apply weight decay to: wpe(1), qkvw(4), fcw(10)
         float wd = (i == 1 || i == 4 || i == 10) ? weight_decay : 0.0f;
@@ -1480,7 +1480,6 @@ void delete_checkpoint(const char* output_log_dir, int step, MultiGpuConfig* mul
 void error_usage() {
     fprintf(stderr, "Usage:   ./train_gpt2cu [options]\n");
     fprintf(stderr, "         ./train_gpt2q115cu [options]  (Q1.15 fixed-point training)\n");
-    fprintf(stderr, "         ./train_gpt2q131cu [options]  (Q1.31 fixed-point training)\n");
     fprintf(stderr, "Options:\n");
     // file system input / output
     fprintf(stderr, "  -i <string> train data filename pattern (default = dev/data/tinyshakespeare/tiny_shakespeare_train.bin)\n");
@@ -1502,7 +1501,6 @@ void error_usage() {
     fprintf(stderr, "  -k <string> learning rate scheduler (default = cosine)\n");
     fprintf(stderr, "  -l <float>  learning rate (default = 3e-4f)\n");
     fprintf(stderr, "  -u <int>    learning rate warmup iterations (default = 0, no warmup)\n");
-    fprintf(stderr, "  -q <int|float> quantization mode (115=Q1.15, 131=Q1.31) or LR decay fraction (default = 1.0)\n");
     fprintf(stderr, "               When used for quantization, verifies the binary was compiled with that mode.\n");
     fprintf(stderr, "  -c <float>  weight decay (default = 0.0f)\n");
     fprintf(stderr, "  -sl <float> outlier stability: skip update if loss goes above this in zscore (0.0f=off)\n");
@@ -1531,7 +1529,6 @@ void error_usage() {
     fprintf(stderr, "  -pp <string> fs_path - used only when nccl_init_method is fs (default = /tmp)\n");
     fprintf(stderr, "\nQuantization modes (compile-time selection via make targets):\n");
     fprintf(stderr, "  make q115   Build train_gpt2q115cu with Q1.15 fixed-point (16-bit)\n");
-    fprintf(stderr, "  make q131   Build train_gpt2q131cu with Q1.31 fixed-point (32-bit, higher precision)\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1570,7 +1567,7 @@ int main(int argc, char *argv[]) {
     int recompute = 1; // recompute during backward setting, 0 = none, 1 = recompute gelu
     int zero_stage = 0; // Zero Optimization Stage for Multi-GPU training
     int hellaswag_eval = 0;
-    int requested_quant_mode = 0; // 0=none specified, 115=Q1.15, 131=Q1.31
+    int requested_quant_mode = 0; // 0=none specified, 115=Q1.15
     // multi-node settings
     int num_processes = 1;  // this should be set by the slurm environment
     int process_rank = 0;  // this should be set by the slurm environment
@@ -1631,28 +1628,24 @@ int main(int argc, char *argv[]) {
         else { error_usage(); }
     }
 
-    // Validate quantization mode if requested via -q 115 or -q 131
+    // Validate quantization mode if requested via -q 115
     if (requested_quant_mode != 0) {
         int compiled_mode = 0;
-#if defined(ENABLE_Q131)
-        compiled_mode = 131;
-#elif defined(ENABLE_Q115)
+#if defined(ENABLE_Q115)
         compiled_mode = 115;
 #endif
         if (compiled_mode == 0) {
-            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled without quantization.\n", 
-                    requested_quant_mode == 115 ? 15 : 31);
-            fprintf(stderr, "       Use 'make q115' for Q1.15 or 'make q131' for Q1.31 builds.\n");
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.15 but binary was compiled without quantization.\n");
+            fprintf(stderr, "       Use 'make q115' for Q1.15 build.\n");
             exit(EXIT_FAILURE);
         }
         if (compiled_mode != requested_quant_mode) {
-            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled with Q1.%d.\n",
-                    requested_quant_mode == 115 ? 15 : 31,
-                    compiled_mode == 115 ? 15 : 31);
-            fprintf(stderr, "       Use the correct binary: train_gpt2q%dcu\n", requested_quant_mode);
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled with Q1.15.\n",
+                    requested_quant_mode == 115 ? 15 : 31);
+            fprintf(stderr, "       Use the correct binary: train_gpt2q115cu\n");
             exit(EXIT_FAILURE);
         }
-        printf("Quantization mode Q1.%d verified.\n", requested_quant_mode == 115 ? 15 : 31);
+        printf("Quantization mode Q1.15 verified.\n");
     }
 
     multi_gpu_config = multi_gpu_config_init(num_processes, process_rank, gpus_per_node, server_ip, fs_path, nccl_init_method);
@@ -1705,8 +1698,7 @@ int main(int argc, char *argv[]) {
     const char* precision_str = (PRECISION_MODE == PRECISION_FP32)
                               ? (cublas_compute == CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : "FP32")
                               : (PRECISION_MODE == PRECISION_FP16 ? "FP16" 
-                                : (PRECISION_MODE == PRECISION_Q115 ? "Q1.15"
-                                  : (PRECISION_MODE == PRECISION_Q131 ? "Q1.31" : "BF16")));
+                                : (PRECISION_MODE == PRECISION_Q115 ? "Q1.15" : "BF16"));
     printf0("| device                | %-50s |\n", deviceProp.name);
     printf0("| peak TFlops           | %-50.1f |\n", get_flops_promised(deviceProp.name, PRECISION_MODE));
     printf0("| precision             | %-50s |\n", precision_str);
@@ -2003,10 +1995,7 @@ int main(int argc, char *argv[]) {
             printf0("skipping update due to grad z-score of %f\n", zgrad);
         } else {
             // clip the gradient norm to a maximum value
-#if defined(ENABLE_Q131)
-            // Slightly lower grad clip for Q1.31 (has more precision, but still fixed-point)
-            float grad_clip = 0.75f;
-#elif defined(ENABLE_Q115)
+#if defined(ENABLE_Q115)
             // Lower grad clip for Q1.15 to prevent large updates that can destabilize training
             float grad_clip = 0.5f;
 #else

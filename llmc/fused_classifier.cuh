@@ -10,11 +10,7 @@ Fused Classifier:
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
-#if defined(ENABLE_Q131)
-#include "q131_common.cuh"
-// Q1.31 logit scaling: Q1.31 stores values in [-1, 1), but logits need [-16, 16] range
-#define Q115_LOGIT_SCALE Q131_LOGITS_SCALE  // Use the scale from q131_common.cuh (16.0f)
-#elif defined(ENABLE_Q115)
+#if defined(ENABLE_Q115)
 #include "q115_common.cuh"
 // Q1.15 logit scaling: Q1.15 stores values in [-1, 1), but logits need [-16, 16] range
 // This scale factor is applied before softmax to expand the effective range

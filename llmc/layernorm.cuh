@@ -18,9 +18,7 @@ For Q1.15 mode: LayerNorm is replaced with RMSNorm-Q which:
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
-#if defined(ENABLE_Q131)
-#include "q131_common.cuh"
-#elif defined(ENABLE_Q115)
+#if defined(ENABLE_Q115)
 #include "q115_common.cuh"
 #endif
 
@@ -95,8 +93,8 @@ __global__ void rmsnorm_q_backward_kernel(floatX* dinp, floatX* dweight,
     
     // Gradient w.r.t. weight: dy * (x * rms_inv)
     float dw = dy * x_val * rms_inv;
-#if defined(ENABLE_Q115) || defined(ENABLE_Q131)
-    // For fixed-point modes, atomicAdd doesn't work on int16/int32
+#if defined(ENABLE_Q115)
+    // For fixed-point modes, atomicAdd doesn't work on int16
     // We need to use a workaround - accumulate via float atomics and convert
     // This is a simplified version - for production, consider using shared memory reduction
     // For now, we'll skip the atomic and note that this kernel needs redesign for fixed-point
