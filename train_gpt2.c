@@ -286,7 +286,8 @@ void matmul_forward(q115_t* out,
     #pragma omp parallel for
     for (int obt = 0; obt < B * T; obt += LOOP_UNROLL) {
         // Pre-convert input slice to float to reduce conversion overhead
-        float inp_cache[LOOP_UNROLL * C];
+        // Use malloc instead of VLA for MSVC compatibility
+        float* inp_cache = (float*)malloc(LOOP_UNROLL * C * sizeof(float));
         for (int ibt = 0; ibt < LOOP_UNROLL; ibt++) {
             int bt = obt + ibt;
             for (int i = 0; i < C; i++) {
@@ -316,6 +317,7 @@ void matmul_forward(q115_t* out,
                 out[bt * OC + o] = float_to_q115(result[ibt]);
             }
         }
+        free(inp_cache);
     }
 }
 
@@ -1466,21 +1468,17 @@ int main() {
         gpt2_build_from_checkpoint(&model, "gpt2_124M.bin"); // will trigger fallback
     }
 
-    // build the DataLoaders from tokens files. for now use tiny_shakespeare if available, else tiny_stories
-    const char* tiny_stories_train = "dev/data/tinystories/TinyStories_train.bin";
-    const char* tiny_stories_val = "dev/data/tinystories/TinyStories_val.bin";
-    const char* tiny_shakespeare_train = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
-    const char* tiny_shakespeare_val = "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
-    const char* train_tokens = access(tiny_stories_train, F_OK) != -1 ? tiny_stories_train : tiny_shakespeare_train;
-    const char* val_tokens = access(tiny_stories_val, F_OK) != -1 ? tiny_stories_val : tiny_shakespeare_val;
+    // build the DataLoaders from tokens files using fineweb dataset
+    const char* train_data_pattern = "dev/data/fineweb10B/fineweb_train_*.bin";
+    const char* val_data_pattern = "dev/data/fineweb10B/fineweb_val_*.bin";
     int B = 4; // batch size 4 (i.e. 4 independent token sequences will be trained on)
-    int T = 64; // sequence length 64 (i.e. each sequence is 64 tokens long). must be <= maxT, which is 1024 for GPT-2
+    int T = 1024; // sequence length 1024 (max for GPT-2)
     DataLoader train_loader, val_loader;
-    dataloader_init(&train_loader, train_tokens, B, T, 0, 1, 1);
-    dataloader_init(&val_loader, val_tokens, B, T, 0, 1, 0);
+    dataloader_init(&train_loader, train_data_pattern, B, T, 0, 1, 1);
+    dataloader_init(&val_loader, val_data_pattern, B, T, 0, 1, 0);
     printf("train dataset num_batches: %zu\n", train_loader.num_tokens / (B*T));
     printf("val dataset num_batches: %zu\n", val_loader.num_tokens / (B*T));
-    int val_num_batches = 5;
+    int val_num_batches = 20; // increased for larger dataset
 
     // build the Tokenizer
     Tokenizer tokenizer;

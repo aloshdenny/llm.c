@@ -20,6 +20,8 @@ Implements:
 // ----------------------------------------------------------------------------
 // implementation of glob for Windows
 #ifdef _WIN32
+#ifndef _GLOB_T_DEFINED
+#define _GLOB_T_DEFINED
     // Windows glob implementation
     typedef struct {
         size_t gl_pathc;    // Count of paths matched
@@ -102,6 +104,7 @@ Implements:
         pglob->gl_pathc = 0;
         pglob->gl_pathv = NULL;
     }
+#endif // _GLOB_T_DEFINED
 #else
     #include <glob.h>
 #endif

@@ -32,10 +32,13 @@ static inline int clock_gettime(int ignore_variable, struct timespec* tv)
 #define mkdir(path, mode) _mkdir(path) /* sketchy way to get mkdir to work on windows */
 #define stat _stat
 
+#ifndef _GLOB_T_DEFINED
+#define _GLOB_T_DEFINED
 typedef struct glob_t {
     size_t gl_pathc;    // Count of matched pathnames
     char **gl_pathv;    // List of matched pathnames
 } glob_t;
+#endif // _GLOB_T_DEFINED
 
 static inline void replace_forward_slashes(char* str) {
     while (*str) {
