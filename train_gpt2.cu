@@ -1593,9 +1593,9 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'l' && argv[i][2] == 'g') { log_gpu_every = atoi(argv[i+1]); }
         else if (argv[i][1] == 'u') { warmup_iterations = atoi(argv[i+1]); }
         else if (argv[i][1] == 'q') {
-            // -q can be either quantization mode (115, 131) or LR decay fraction (0.0-1.0)
+            // -q can be either quantization mode (115) or LR decay fraction (0.0-1.0)
             int qval = atoi(argv[i+1]);
-            if (qval == 115 || qval == 131) {
+            if (qval == 115) {
                 requested_quant_mode = qval;
             } else {
                 final_learning_rate_frac = atof(argv[i+1]);
