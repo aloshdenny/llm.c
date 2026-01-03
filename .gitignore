@@ -15,7 +15,11 @@ test_gpt2
 test_gpt2cu
 test_gpt2fp32cu
 train_gpt2
+train_gpt3
 train_gpt2cu
+train_gpt3cu
+train_gpt2raw
+train_gpt2rawcu
 train_gpt2fp32cu
 profile_gpt2cu
 dev/cuda/*_forward
