@@ -10,6 +10,53 @@ AdamW kernel
 #endif
 
 // ----------------------------------------------------------------------------
+// Q1.15 Weight Constraint Mode
+// When enabled, weights are clamped to Q1.15 representable range [-1, 1) after updates
+// This allows bf16 computation while constraining weights to Q1.15 range
+// ----------------------------------------------------------------------------
+
+// Q1.15 weight constraint constants
+#define Q115_WEIGHT_MIN -1.0f
+#define Q115_WEIGHT_MAX 0.999969482421875f  // (32767/32768) - largest Q1.15 value
+
+// Kernel to clamp weights to Q1.15 range
+template <typename Tp>
+__global__ void clamp_weights_q115_kernel(Tp* params_memory, float* master_params_memory, 
+                                           size_t num_parameters, ptrdiff_t w_stride, ptrdiff_t s_stride) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_parameters) { return; }
+    
+    // Adjust for layer offset
+    params_memory += blockIdx.y * w_stride;
+    
+    // Read the parameter value
+    float param_val = (float)params_memory[idx];
+    
+    // Clamp to Q1.15 range [-1, 1)
+    float clamped_val = fmaxf(Q115_WEIGHT_MIN, fminf(Q115_WEIGHT_MAX, param_val));
+    
+    // Write back the clamped value
+    params_memory[idx] = (Tp)clamped_val;
+    
+    // Also update master weights if present
+    if (master_params_memory != nullptr) {
+        master_params_memory += blockIdx.y * s_stride;
+        master_params_memory[idx] = clamped_val;
+    }
+}
+
+// Host function to clamp weights to Q1.15 range
+template <typename Tp>
+void clamp_weights_q115(Tp* params_memory, float* master_params_memory, size_t num_parameters,
+                        ptrdiff_t w_stride, ptrdiff_t s_stride, int num_slices, cudaStream_t stream) {
+    int block_size = 512;
+    int num_blocks = CEIL_DIV(num_parameters, block_size);
+    clamp_weights_q115_kernel<<<dim3(num_blocks, num_slices), block_size, 0, stream>>>(
+        params_memory, master_params_memory, num_parameters, w_stride, s_stride);
+    cudaCheck(cudaGetLastError());
+}
+
+// ----------------------------------------------------------------------------
 // CUDA kernels
 
 // Implements linear interpolation using only two floating-point operations (as opposed to three in a naive implementation).

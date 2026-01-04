@@ -485,6 +485,11 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
         float random_val = (((seed * 0x2545F4914F6CDD1Dull) >> 32) / (float)UINT32_MAX) * 2.0f - 1.0f;
         random_val *= init_scale; // Scale to [-0.1, 0.1]
         
+#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+        // Clamp to Q1.15 range [-1, 1) for weight-constrained training
+        random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
+#endif
+        
         #if PRECISION_MODE == PRECISION_FP32
             params_memory_cpu[i] = random_val;
         #elif PRECISION_MODE == PRECISION_BF16
@@ -736,7 +741,14 @@ void gpt_build_from_descriptor(GPT2 *model, const char* descriptor) {
                 float *fp32_buffer = (float*)mallocCheck(n * sizeof(float));
                 normal_(fp32_buffer, n, 0.0f, scale, &init_rng);
                 for (size_t j = 0; j < n; j++) {
+#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+                    // Clamp to Q1.15 range [-1, 1) for weight-constrained training
+                    float val = fp32_buffer[j];
+                    val = fmaxf(-1.0f, fminf(0.999969482421875f, val));
+                    params_memory_cpu[offset + layer_offset + j] = (floatX)val;
+#else
                     params_memory_cpu[offset + layer_offset + j] = (floatX)fp32_buffer[j];
+#endif
                 }
                 free(fp32_buffer);
             }
@@ -1211,6 +1223,10 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
         if (init_from_master_only) {
             // when resuming training from a checkpoint with master weights (allows changing precision)
             init_from_master(param_ptr, master_ptr, shard.size, tensor.size, shard.size, num_layers, seed, main_stream);
+#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+            // Clamp weights to Q1.15 range after initialization
+            clamp_weights_q115(param_ptr, master_ptr, shard.size, tensor.size, shard.size, num_layers, main_stream);
+#endif
         } else {
             // ok finally call the kernel to update the weights with AdamW
             adamw_update(param_ptr, master_ptr, grad_ptr,
@@ -1218,6 +1234,11 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
                         shard.size, tensor.size, tensor.size, shard.size, num_layers,
                         learning_rate,
                         beta1, beta2, t, eps, wd, grad_scale, seed, main_stream);
+#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+            // Clamp weights to Q1.15 range [-1, 1) after each update
+            // This ensures weights never exceed Q1.15 representable range while computation is in bf16
+            clamp_weights_q115(param_ptr, master_ptr, shard.size, tensor.size, shard.size, num_layers, main_stream);
+#endif
         }
 
         if (multi_gpu_config->zero_stage == 1) {
@@ -1528,7 +1549,8 @@ void error_usage() {
     fprintf(stderr, "  -ps <string> server_ip - used only when nccl_init_method is tcp (default = -1)\n");
     fprintf(stderr, "  -pp <string> fs_path - used only when nccl_init_method is fs (default = /tmp)\n");
     fprintf(stderr, "\nQuantization modes (compile-time selection via make targets):\n");
-    fprintf(stderr, "  make q115   Build train_gpt2q115cu with Q1.15 fixed-point (16-bit)\n");
+    fprintf(stderr, "  make q115             Build train_gpt2q115cu with Q1.15 fixed-point (16-bit)\n");
+    fprintf(stderr, "  make q115_constrained Build train_gpt2q115_constrainedcu with bf16 compute, weights clamped to Q1.15 range\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1702,6 +1724,9 @@ int main(int argc, char *argv[]) {
     printf0("| device                | %-50s |\n", deviceProp.name);
     printf0("| peak TFlops           | %-50.1f |\n", get_flops_promised(deviceProp.name, PRECISION_MODE));
     printf0("| precision             | %-50s |\n", precision_str);
+#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+    printf0("| weight constraint     | %-50s |\n", "Q1.15 range [-1, 1) enabled");
+#endif
     printf0("+-----------------------+----------------------------------------------------+\n");
 
     // figure out if we are going to be resuming the optimization

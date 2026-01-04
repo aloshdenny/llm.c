@@ -96,11 +96,15 @@ TARGETS = train_gpt2 test_gpt2 train_gpt2cu train_gpt2rawcu train_gpt3cu test_gp
 
 # Quantized training targets
 TARGETS_Q115 = train_gpt2q115cu train_gpt3q115cu
+# Q1.15 weight-constrained training (bf16 compute, weights clamped to Q1.15 range)
+TARGETS_Q115_CONSTRAINED = train_gpt2q115_constrainedcu train_gpt3q115_constrainedcu
 
-.PHONY: all clean q115
+.PHONY: all clean q115 q115_constrained
 all: $(TARGETS)
 
 q115: $(TARGETS_Q115)
+
+q115_constrained: $(TARGETS_Q115_CONSTRAINED)
 
 # ===============================
 # CPU targets
@@ -146,6 +150,15 @@ train_gpt2q115cu: train_gpt2.cu $(NVCC_CUDNN)
 
 train_gpt3q115cu: train_gpt3.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
+
+# ===============================
+# Q1.15 Weight-Constrained CUDA targets (bf16 compute, weights in Q1.15 range)
+# ===============================
+train_gpt2q115_constrainedcu: train_gpt2.cu $(NVCC_CUDNN)
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115_WEIGHT_CONSTRAINT $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
+
+train_gpt3q115_constrainedcu: train_gpt3.cu $(NVCC_CUDNN)
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115_WEIGHT_CONSTRAINT $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
 
 # ===============================
 # Clean

@@ -512,7 +512,7 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
         }
         if (PRECISION_MODE == PRECISION_FP32 && version != 3) {
             fprintf(stderr, "Precision is configured as FP32 but model at %s is not.\n", checkpoint_path);
-            fprintf(stderr, "---> HINT: to turn on FP32 you have to compile like: `make train_gpt2cu PRECISION=FP32`\n");
+            fprintf(stderr, "---> HINT: to turn on FP32 you have to compile like: `make train_gpt2rawcu PRECISION=FP32`\n");
             fprintf(stderr, "---> HINT: are you sure you're loading a .bin file without any _bf16 in the name?\n");
             exit(EXIT_FAILURE);
         }
@@ -1387,7 +1387,7 @@ void delete_checkpoint(const char* output_log_dir, int step, MultiGpuConfig* mul
 // (all single letters have been claimed now)
 
 void error_usage() {
-    fprintf(stderr, "Usage:   ./train_gpt2cu [options]\n");
+    fprintf(stderr, "Usage:   ./train_gpt2rawcu [options]\n");
     fprintf(stderr, "Options:\n");
     // file system input / output
     fprintf(stderr, "  -i <string> train data filename pattern (default = dev/data/tinyshakespeare/tiny_shakespeare_train.bin)\n");
