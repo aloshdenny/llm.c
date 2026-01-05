@@ -23,20 +23,22 @@ USE_CUDNN ?= 0
 BUILD_DIR = build
 
 # ===============================
-# Windows setup
+# Windows / Linux setup
 # ===============================
-ifeq ($(OS), Windows_NT)
+ifeq ($(OS),Windows_NT)
   $(shell if not exist $(BUILD_DIR) mkdir $(BUILD_DIR))
   REMOVE_BUILD_OBJECT_FILES := del $(BUILD_DIR)\*.obj
   REMOVE_FILES = del *.exe *.obj *.lib *.exp *.pdb
   OUTPUT_FILE = /link /OUT:$@
   CUDA_OUTPUT_FILE = -o $@ && copy /Y $@.exe $@
+  OBJ_EXT = obj
 else
   $(shell mkdir -p $(BUILD_DIR))
   REMOVE_BUILD_OBJECT_FILES := rm -f $(BUILD_DIR)/*.o
   REMOVE_FILES = rm -f
   OUTPUT_FILE = -o $@
   CUDA_OUTPUT_FILE = -o $@
+  OBJ_EXT = o
 endif
 
 # ===============================
@@ -68,7 +70,6 @@ ifeq ($(OS),Windows_NT)
 
 else  # ===== Linux =====
 
-  # cuDNN frontend
   ifeq ($(shell test -d $$HOME/cudnn-frontend/include && echo exists),exists)
     CUDNN_FRONTEND_PATH = $(HOME)/cudnn-frontend/include
   else ifeq ($(shell test -d cudnn-frontend/include && echo exists),exists)
@@ -77,7 +78,6 @@ else  # ===== Linux =====
     $(error [ERROR] cuDNN frontend not found. See README)
   endif
 
-  # System-installed cuDNN (default CUDA layout)
   CUDNN_INCLUDE_PATH = -I/usr/include
   CUDNN_LIB_PATH     = -L/usr/lib/x86_64-linux-gnu
 
@@ -88,7 +88,7 @@ endif
   NVCC_LDLIBS   += -lcudnn
   NVCC_FLAGS    += -DENABLE_CUDNN
 
-  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
+  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.$(OBJ_EXT)
 
 else
   $(info → cuDNN disabled by default. Run make USE_CUDNN=1 to enable)
@@ -116,16 +116,12 @@ endif
 # ===============================
 TARGETS = train_gpt2 test_gpt2 train_gpt2cu train_gpt2rawcu train_gpt3cu test_gpt2cu train_gpt2fp32cu test_gpt2fp32cu $(NVCC_CUDNN)
 
-# Quantized training targets
 TARGETS_Q115 = train_gpt2q115cu train_gpt3q115cu
-# Q1.15 weight-constrained training (bf16 compute, weights clamped to Q1.15 range)
 TARGETS_Q115_CONSTRAINED = train_gpt2q115_constrainedcu train_gpt3q115_constrainedcu
 
 .PHONY: all clean q115 q115_constrained
 all: $(TARGETS)
-
 q115: $(TARGETS_Q115)
-
 q115_constrained: $(TARGETS_Q115_CONSTRAINED)
 
 # ===============================
@@ -174,7 +170,7 @@ train_gpt3q115cu: train_gpt3.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
 
 # ===============================
-# Q1.15 Weight-Constrained CUDA targets (bf16 compute, weights in Q1.15 range)
+# Q1.15 Weight-Constrained CUDA
 # ===============================
 train_gpt2q115_constrainedcu: train_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115_WEIGHT_CONSTRAINT $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
