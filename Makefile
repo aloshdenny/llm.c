@@ -8,17 +8,16 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings (Modal with rpath fix)
+# CUDA / NVCC settings (Modal + proper nvcc linker)
 # ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O) -Wno-deprecated-gpu-targets
-# CRITICAL: rpath embeds lib search paths for runtime
+# nvcc syntax: -Xlinker passes to host linker (gcc/ld)
 NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
                -L/usr/local/cuda/lib64 \
-               -L/usr/lib/x86_64-linux-gnu \
-               -Wl,-rpath=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
-               -Wl,-rpath=/usr/local/cuda/lib64
+               -Xlinker -rpath=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+               -Xlinker -rpath=/usr/local/cuda/lib64
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
 NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
@@ -31,7 +30,8 @@ BUILD_DIR = build
 
 ifeq ($(USE_CUDNN),1)
   NVCC_INCLUDES += -I/usr/local/lib/python3.12/site-packages/nvidia/cudnn/include
-  NVCC_LDFLAGS  += -L/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib -Wl,-rpath=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
+  NVCC_LDFLAGS  += -L/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib \
+                   -Xlinker -rpath=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
   NVCC_LDLIBS   += -lcudnn
   NVCC_FLAGS    += -DENABLE_CUDNN
   NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
@@ -78,4 +78,4 @@ test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 clean:
-	rm -f $(BUILD_DIR)/*.o *.o *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
+	rm -f $(BUILD_DIR)/*.o *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
