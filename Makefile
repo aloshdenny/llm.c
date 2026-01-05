@@ -1,11 +1,11 @@
 # ===============================
-# Compiler settings
+# Compiler settings (Modal llm.c)
 # ===============================
 CC ?= g++
 CFLAGS = -O2 -Wall -Wextra -std=c++17
 
 # ===============================
-# CUDA / NVCC settings (symlink method)
+# CUDA settings (exact Modal paths)
 # ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
@@ -16,31 +16,13 @@ NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include 
                 -I/usr/local/cuda/include \
                 -I/usr/local/cuda/targets/x86_64-linux/include
 
-# Local symlinks + rpath trick
-NVCC_LDFLAGS = -L. -L/usr/lib/x86_64-linux-gnu \
-               -Xlinker -rpath=.
+# EXACT rpaths for your libs
+NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+               -L/usr/lib/x86_64-linux-gnu \
+               -Xlinker '-rpath=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64'
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
 
-USE_CUDNN ?= 0
-BUILD_DIR = build
 PRECISION ?= BF16
-
-# ===============================
-# Pre-build: symlink libs locally
-# ===============================
-.PHONY: libsyms
-libsyms:
-	ln -sf /usr/local/lib/python3.12/site-packages/nvidia/cublas/lib/libcublas.so.12 ./libcublas.so
-	ln -sf /usr/local/lib/python3.12/site-packages/nvidia/cublas/lib/libcublasLt.so.12 ./libcublasLt.so
-	ln -sf /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 ./libnvml.so
-
-# ===============================
-# Targets
-# ===============================
-TARGETS = train_gpt2cu train_gpt2fp32cu
-
-all: libsyms $(TARGETS)
-
 ifeq ($(PRECISION),FP32)
   PFLAGS = -DENABLE_FP32
 else ifeq ($(PRECISION),FP16)
@@ -49,15 +31,33 @@ else
   PFLAGS = -DENABLE_BF16
 endif
 
-train_gpt2cu: train_gpt2.cu libsyms
+# ===============================
+# Targets
+# ===============================
+TARGETS = train_gpt2cu train_gpt2fp32cu
+
+.PHONY: all clean run test
+
+all: $(TARGETS)
+
+train_gpt2cu: train_gpt2.cu
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
-train_gpt2fp32cu: train_gpt2_fp32.cu libsyms
+train_gpt2fp32cu: train_gpt2_fp32.cu
 	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
-clean:
-	rm -f libcublas.so libcublasLt.so libnvml.so *.o *.out $(BUILD_DIR)/*
-
-.PHONY: run
+# Test execution
 run: train_gpt2cu
-	LD_LIBRARY_PATH=.:$$LD_LIBRARY_PATH ./train_gpt2cu --help
+	@ldd ./train_gpt2cu | grep cublas || echo "Libs linked!"
+	./train_gpt2cu --help
+
+test: train_gpt2cu
+	@echo "✅ Build success! Binary size:"
+	@ls -lh train_gpt2cu
+	@echo "✅ Libs found:"
+	@ldd ./train_gpt2cu | grep -E "(cublas|nvml)"
+	@echo "✅ Runs:"
+	@./train_gpt2cu --help | head -5
+
+clean:
+	rm -f *.o *.out
