@@ -1879,7 +1879,7 @@ int main(int argc, char *argv[]) {
     cudaEvent_t start, end;
     cudaCheck(cudaEventCreate(&start));
     cudaCheck(cudaEventCreate(&end));
-    cudaCheck(cudaProfilerStart());
+    // cudaCheck(cudaProfilerStart());
     double total_sum_iteration_time_s = 0.0;
     float ema_tokens_per_second = 0.0f;
     for (; step <= train_num_batches; step++) {
@@ -2059,7 +2059,7 @@ int main(int argc, char *argv[]) {
         logger_log_train(&logger, step, model.mean_loss, step_learning_rate, grad_norm);
 
         // disable the profiler after 3 steps of optimization
-        if (step == 3) { cudaProfilerStop(); }
+        // if (step == 3) { cudaProfilerStop(); }
     }
     // add a total average, for optimizations that are only mild improvements (excluding 1st batch as warmup)
     printf0("total average iteration time: %f ms\n", total_sum_iteration_time_s / (train_num_batches-1) * 1000);
