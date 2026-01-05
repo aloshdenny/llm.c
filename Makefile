@@ -15,7 +15,7 @@ FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O)
 NVCC_LDFLAGS =
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
-NVCC_INCLUDES = -I/usr/local/cuda/include
+NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include -I/usr/local/cuda/include
 NVCC_CUDNN =
 
 USE_CUDNN ?= 0
