@@ -56,7 +56,7 @@ train_gpt2fp32cu: train_gpt2_fp32.cu libsyms
 	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 clean:
-	rm -f libcublas.so libcublasLt.so libnvml.so *.o train_gpt2* $(BUILD_DIR)/*
+	rm -f libcublas.so libcublasLt.so libnvml.so *.o *.out $(BUILD_DIR)/*
 
 .PHONY: run
 run: train_gpt2cu
