@@ -8,14 +8,17 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings (Modal-specific)
+# CUDA / NVCC settings (Modal/Conda NVIDIA)
 # ===============================
-NVCC ?= nvcc  # Modal has nvcc in PATH
+NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O)
-NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib -L/usr/local/lib/python3.12/site-packages/nvidia/libcublasLt/lib
+NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib -L/usr/local/lib/python3.12/site-packages/nvidia/libcublasLt/lib64
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
-NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include
+# Modal/Conda critical: explicit include paths FIRST
+NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
+                -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
+                -I/usr/local/cuda/include
 
 USE_CUDNN ?= 0
 BUILD_DIR = build
@@ -57,23 +60,22 @@ TARGETS = train_gpt2cu test_gpt2cu train_gpt2fp32cu
 all: $(TARGETS)
 
 # ===============================
-# CUDA targets
+# CUDA targets (INCLUDES before sources!)
 # ===============================
 $(NVCC_CUDNN): llmc/cudnn_att.cpp
-	$(NVCC) -c $(NVCC_FLAGS) $(PFLAGS) $< $(NVCC_INCLUDES) -o $@
+	$(NVCC) -c $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $< -o $@
 
 train_gpt2cu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 train_gpt2fp32cu: train_gpt2_fp32.cu
-	$(NVCC) $(NVCC_FLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 # ===============================
 # Clean
 # ===============================
 clean:
-	rm -f $(BUILD_DIR)/*.o
-	rm -f *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
+	rm -f $(BUILD_DIR)/*.o *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
