@@ -8,16 +8,19 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings (Modal/Conda NVIDIA)
+# CUDA / NVCC settings (Modal/Conda NVIDIA + NVTX)
 # ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O)
-NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib -L/usr/local/lib/python3.12/site-packages/nvidia/libcublasLt/lib64
+NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+               -L/usr/local/lib/python3.12/site-packages/nvidia/libcublasLt/lib \
+               -L/usr/local/lib/python3.12/site-packages/nvidia/nvtx/lib 2>/dev/null || true
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
-# Modal/Conda critical: explicit include paths FIRST
+# Full Modal/Conda includes: cublas + cudart + nvtx3 + fallback CUDA
 NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
+                -I/usr/local/lib/python3.12/site-packages/nvidia/nvtx/include \
                 -I/usr/local/cuda/include
 
 USE_CUDNN ?= 0
@@ -35,7 +38,7 @@ else
 endif
 
 # ===============================
-# Precision settings
+# Precision settings (unchanged)
 # ===============================
 PRECISION ?= BF16
 VALID_PRECISIONS := FP32 FP16 BF16
@@ -52,16 +55,13 @@ else
 endif
 
 # ===============================
-# Targets
+# Targets (unchanged order)
 # ===============================
 TARGETS = train_gpt2cu test_gpt2cu train_gpt2fp32cu
 
 .PHONY: all clean
 all: $(TARGETS)
 
-# ===============================
-# CUDA targets (INCLUDES before sources!)
-# ===============================
 $(NVCC_CUDNN): llmc/cudnn_att.cpp
 	$(NVCC) -c $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $< -o $@
 
@@ -74,8 +74,5 @@ train_gpt2fp32cu: train_gpt2_fp32.cu
 test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
-# ===============================
-# Clean
-# ===============================
 clean:
 	rm -f $(BUILD_DIR)/*.o *.o *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
