@@ -1,70 +1,63 @@
-# ========================================
-# llm.c Makefile for Modal GPU (tested)
-# ========================================
-# Requirements: profiler line commented in llmc/cuda_common.h:15
-# Usage: export LD_LIBRARY_PATH=... then make && ./train_gpt2cu
-
+# ===============================
+# Compiler settings
+# ===============================
 CC ?= g++
 CFLAGS = -O2 -Wall -Wextra -std=c++17
 
+# ===============================
+# CUDA / NVCC settings (symlink method)
+# ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O) -Wno-deprecated-gpu-targets
-NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
-               -L/usr/lib/x86_64-linux-gnu \
-               -L/usr/local/cuda/lib64
-NVCC_LDLIBS = -lcublas -lcublasLt -lnvml -lcudart
 NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/nvtx/include \
                 -I/usr/local/cuda/include \
                 -I/usr/local/cuda/targets/x86_64-linux/include
 
+# Local symlinks + rpath trick
+NVCC_LDFLAGS = -L. -L/usr/lib/x86_64-linux-gnu \
+               -Xlinker -rpath=.
+NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
+
 USE_CUDNN ?= 0
 BUILD_DIR = build
 PRECISION ?= BF16
 
-ifeq ($(USE_CUDNN),1)
-  NVCC_INCLUDES += -I/usr/local/lib/python3.12/site-packages/nvidia/cudnn/include
-  NVCC_LDFLAGS  += -L/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
-  NVCC_LDLIBS   += -lcudnn
-  NVCC_FLAGS    += -DENABLE_CUDNN
-  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
-  $(info → cuDNN enabled)
-endif
+# ===============================
+# Pre-build: symlink libs locally
+# ===============================
+.PHONY: libsyms
+libsyms:
+	ln -sf /usr/local/lib/python3.12/site-packages/nvidia/cublas/lib/libcublas.so.12 ./libcublas.so
+	ln -sf /usr/local/lib/python3.12/site-packages/nvidia/cublas/lib/libcublasLt.so.12 ./libcublasLt.so
+	ln -sf /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 ./libnvml.so
 
-# Precision
-PFLAGS = -DENABLE_BF16
+# ===============================
+# Targets
+# ===============================
+TARGETS = train_gpt2cu train_gpt2fp32cu
+
+all: libsyms $(TARGETS)
+
 ifeq ($(PRECISION),FP32)
   PFLAGS = -DENABLE_FP32
 else ifeq ($(PRECISION),FP16)
   PFLAGS = -DENABLE_FP16
+else
+  PFLAGS = -DENABLE_BF16
 endif
 
-TARGETS = train_gpt2cu train_gpt2fp32cu test_gpt2cu
+train_gpt2cu: train_gpt2.cu libsyms
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
-.PHONY: all clean run
-
-all: $(TARGETS)
-
-$(NVCC_CUDNN): llmc/cudnn_att.cpp
-	$(NVCC) -c $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $< -o $@
-
-train_gpt2cu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
-
-train_gpt2fp32cu: train_gpt2_fp32.cu
-	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
-
-test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
-
-# ========================================
-# Modal Runtime Setup (CRITICAL)
-# ========================================
-run:
-	@export LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:$$LD_LIBRARY_PATH && \
-	 ./train_gpt2cu --help
+train_gpt2fp32cu: train_gpt2_fp32.cu libsyms
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 clean:
-	rm -f $(BUILD_DIR)/*.o *.o *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
+	rm -f libcublas.so libcublasLt.so libnvml.so *.o train_gpt2* $(BUILD_DIR)/*
+
+.PHONY: run
+run: train_gpt2cu
+	LD_LIBRARY_PATH=.:$$LD_LIBRARY_PATH ./train_gpt2cu --help
