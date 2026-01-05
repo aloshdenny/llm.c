@@ -8,22 +8,21 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings
+# CUDA / NVCC settings (Modal-specific)
 # ===============================
-NVCC ?= /usr/local/cuda/bin/nvcc
+NVCC ?= nvcc  # Modal has nvcc in PATH
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O)
-NVCC_LDFLAGS =
+NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib -L/usr/local/lib/python3.12/site-packages/nvidia/libcublasLt/lib
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
-NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include -I/usr/local/cuda/include
-NVCC_CUDNN =
+NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include
 
 USE_CUDNN ?= 0
 BUILD_DIR = build
 
 ifeq ($(USE_CUDNN),1)
-  NVCC_INCLUDES += -I/usr/include
-  NVCC_LDFLAGS  += -L/usr/lib/x86_64-linux-gnu
+  NVCC_INCLUDES += -I/usr/local/lib/python3.12/site-packages/nvidia/cudnn/include
+  NVCC_LDFLAGS  += -L/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
   NVCC_LDLIBS   += -lcudnn
   NVCC_FLAGS    += -DENABLE_CUDNN
   NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
