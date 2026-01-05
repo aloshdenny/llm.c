@@ -8,17 +8,18 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings (Modal + proper nvcc linker)
+# CUDA / NVCC settings (Modal exact libs)
 # ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O) -Wno-deprecated-gpu-targets
-# nvcc syntax: -Xlinker passes to host linker (gcc/ld)
 NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+               -L/usr/lib/x86_64-linux-gnu \
                -L/usr/local/cuda/lib64 \
                -Xlinker -rpath=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+               -Xlinker -rpath=/usr/lib/x86_64-linux-gnu \
                -Xlinker -rpath=/usr/local/cuda/lib64
-NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
+NVCC_LDLIBS = -lcublas -lcublasLt -lnvidia-ml  # Note: -lnvidia-ml not -lnvml
 NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/nvtx/include \
