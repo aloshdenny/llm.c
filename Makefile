@@ -8,17 +8,19 @@ LDLIBS =
 INCLUDES =
 
 # ===============================
-# CUDA / NVCC settings (Modal exact paths)
+# CUDA / NVCC settings (Modal complete)
 # ===============================
 NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O) -Wno-deprecated-gpu-targets
-NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib
+NVCC_LDFLAGS = -L/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib -L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
+# Complete includes for llm.c in Modal
 NVCC_INCLUDES = -I/usr/local/lib/python3.12/site-packages/nvidia/cublas/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/cudart/include \
                 -I/usr/local/lib/python3.12/site-packages/nvidia/nvtx/include \
-                -I/usr/local/cuda/include
+                -I/usr/local/cuda/include \
+                -I/usr/local/cuda/targets/x86_64-linux/include
 
 USE_CUDNN ?= 0
 BUILD_DIR = build
