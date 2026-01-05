@@ -78,4 +78,4 @@ test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
 # Clean
 # ===============================
 clean:
-	rm -f $(BUILD_DIR)/*.o *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
+	rm -f $(BUILD_DIR)/*.o *.o *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
