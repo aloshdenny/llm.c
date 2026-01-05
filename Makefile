@@ -40,14 +40,19 @@ else
 endif
 
 # ===============================
-# FORCE REAL NVCC (fixes bug)
+# NVCC path (Windows / Linux)
 # ===============================
-NVCC := "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\nvcc.exe"
+ifeq ($(OS),Windows_NT)
+  NVCC ?= "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\nvcc.exe"
+else
+  NVCC ?= /usr/local/cuda/bin/nvcc
+endif
 
 # ===============================
-# cuDNN (Windows)
+# cuDNN (Windows / Linux)
 # ===============================
 ifeq ($(USE_CUDNN),1)
+
 ifeq ($(OS),Windows_NT)
 
   ifeq ($(shell if exist "$(HOMEDRIVE)$(HOMEPATH)\cudnn-frontend\include" (echo exists)),exists)
@@ -59,15 +64,32 @@ ifeq ($(OS),Windows_NT)
   endif
 
   CUDNN_INCLUDE_PATH = -I"C:\Program Files\NVIDIA\CUDNN\v9.17\include\13.1"
-  CUDNN_LIB_PATH = -L"C:\Program Files\NVIDIA\CUDNN\v9.17\lib\13.1\x64"
+  CUDNN_LIB_PATH     = -L"C:\Program Files\NVIDIA\CUDNN\v9.17\lib\13.1\x64"
+
+else  # ===== Linux =====
+
+  # cuDNN frontend
+  ifeq ($(shell test -d $$HOME/cudnn-frontend/include && echo exists),exists)
+    CUDNN_FRONTEND_PATH = $(HOME)/cudnn-frontend/include
+  else ifeq ($(shell test -d cudnn-frontend/include && echo exists),exists)
+    CUDNN_FRONTEND_PATH = cudnn-frontend/include
+  else
+    $(error [ERROR] cuDNN frontend not found. See README)
+  endif
+
+  # System-installed cuDNN (default CUDA layout)
+  CUDNN_INCLUDE_PATH = -I/usr/include
+  CUDNN_LIB_PATH     = -L/usr/lib/x86_64-linux-gnu
+
+endif
 
   NVCC_INCLUDES += -I$(CUDNN_FRONTEND_PATH) $(CUDNN_INCLUDE_PATH)
-  NVCC_LDFLAGS += $(CUDNN_LIB_PATH)
-  NVCC_LDLIBS += -lcudnn
-  NVCC_FLAGS += -DENABLE_CUDNN
+  NVCC_LDFLAGS  += $(CUDNN_LIB_PATH)
+  NVCC_LDLIBS   += -lcudnn
+  NVCC_FLAGS    += -DENABLE_CUDNN
 
-  NVCC_CUDNN = $(BUILD_DIR)\cudnn_att.obj
-endif
+  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
+
 else
   $(info → cuDNN disabled by default. Run make USE_CUDNN=1 to enable)
 endif
