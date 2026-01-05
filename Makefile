@@ -1,97 +1,35 @@
 # ===============================
 # Compiler settings
 # ===============================
-CC ?= cl
-CFLAGS = /Idev /Zi /nologo /W4 /WX- /diagnostics:column /sdl /O2 /Oi /Ot /GL /D _DEBUG /D _CONSOLE /D _UNICODE /D UNICODE /Gm- /EHsc /MD /GS /Gy /fp:fast /Zc:wchar_t /Zc:forScope /Zc:inline /permissive- \
- /external:W3 /Gd /TP /wd4996 /Fd$@.pdb /FC /openmp:llvm
+CC ?= g++
+CFLAGS = -O2 -Wall -Wextra -std=c++17
 LDFLAGS =
 LDLIBS =
 INCLUDES =
-CFLAGS_COND =
 
 # ===============================
 # CUDA / NVCC settings
 # ===============================
+NVCC ?= /usr/local/cuda/bin/nvcc
 FORCE_NVCC_O ?= 3
 NVCC_FLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O$(FORCE_NVCC_O)
 NVCC_LDFLAGS =
 NVCC_LDLIBS = -lcublas -lcublasLt -lnvml
-NVCC_INCLUDES =
+NVCC_INCLUDES = -I/usr/local/cuda/include
 NVCC_CUDNN =
 
 USE_CUDNN ?= 0
 BUILD_DIR = build
 
-# ===============================
-# Windows / Linux setup
-# ===============================
-ifeq ($(OS),Windows_NT)
-  $(shell if not exist $(BUILD_DIR) mkdir $(BUILD_DIR))
-  REMOVE_BUILD_OBJECT_FILES := del $(BUILD_DIR)\*.obj
-  REMOVE_FILES = del *.exe *.obj *.lib *.exp *.pdb
-  OUTPUT_FILE = /link /OUT:$@
-  CUDA_OUTPUT_FILE = -o $@ && copy /Y $@.exe $@
-  OBJ_EXT = obj
-else
-  $(shell mkdir -p $(BUILD_DIR))
-  REMOVE_BUILD_OBJECT_FILES := rm -f $(BUILD_DIR)/*.o
-  REMOVE_FILES = rm -f
-  OUTPUT_FILE = -o $@
-  CUDA_OUTPUT_FILE = -o $@
-  OBJ_EXT = o
-endif
-
-# ===============================
-# NVCC path (Windows / Linux)
-# ===============================
-ifeq ($(OS),Windows_NT)
-  NVCC ?= "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\nvcc.exe"
-else
-  NVCC ?= /usr/local/cuda/bin/nvcc
-endif
-
-# ===============================
-# cuDNN (Windows / Linux)
-# ===============================
 ifeq ($(USE_CUDNN),1)
-
-ifeq ($(OS),Windows_NT)
-
-  ifeq ($(shell if exist "$(HOMEDRIVE)$(HOMEPATH)\cudnn-frontend\include" (echo exists)),exists)
-    CUDNN_FRONTEND_PATH = $(HOMEDRIVE)$(HOMEPATH)\cudnn-frontend\include
-  else ifeq ($(shell if exist "cudnn-frontend\include" (echo exists)),exists)
-    CUDNN_FRONTEND_PATH = cudnn-frontend/include
-  else
-    $(error [ERROR] cuDNN frontend not found. See README)
-  endif
-
-  CUDNN_INCLUDE_PATH = -I"C:\Program Files\NVIDIA\CUDNN\v9.17\include\13.1"
-  CUDNN_LIB_PATH     = -L"C:\Program Files\NVIDIA\CUDNN\v9.17\lib\13.1\x64"
-
-else  # ===== Linux =====
-
-  ifeq ($(shell test -d $$HOME/cudnn-frontend/include && echo exists),exists)
-    CUDNN_FRONTEND_PATH = $(HOME)/cudnn-frontend/include
-  else ifeq ($(shell test -d cudnn-frontend/include && echo exists),exists)
-    CUDNN_FRONTEND_PATH = cudnn-frontend/include
-  else
-    $(error [ERROR] cuDNN frontend not found. See README)
-  endif
-
-  CUDNN_INCLUDE_PATH = -I/usr/include
-  CUDNN_LIB_PATH     = -L/usr/lib/x86_64-linux-gnu
-
-endif
-
-  NVCC_INCLUDES += -I$(CUDNN_FRONTEND_PATH) $(CUDNN_INCLUDE_PATH)
-  NVCC_LDFLAGS  += $(CUDNN_LIB_PATH)
+  NVCC_INCLUDES += -I/usr/include
+  NVCC_LDFLAGS  += -L/usr/lib/x86_64-linux-gnu
   NVCC_LDLIBS   += -lcudnn
   NVCC_FLAGS    += -DENABLE_CUDNN
-
-  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.$(OBJ_EXT)
-
+  NVCC_CUDNN = $(BUILD_DIR)/cudnn_att.o
+  $(info → cuDNN enabled)
 else
-  $(info → cuDNN disabled by default. Run make USE_CUDNN=1 to enable)
+  $(info → cuDNN disabled by default)
 endif
 
 # ===============================
@@ -114,24 +52,10 @@ endif
 # ===============================
 # Targets
 # ===============================
-TARGETS = train_gpt2 test_gpt2 train_gpt2cu train_gpt2rawcu train_gpt3cu test_gpt2cu train_gpt2fp32cu test_gpt2fp32cu $(NVCC_CUDNN)
+TARGETS = train_gpt2cu test_gpt2cu train_gpt2fp32cu
 
-TARGETS_Q115 = train_gpt2q115cu train_gpt3q115cu
-TARGETS_Q115_CONSTRAINED = train_gpt2q115_constrainedcu train_gpt3q115_constrainedcu
-
-.PHONY: all clean q115 q115_constrained
+.PHONY: all clean
 all: $(TARGETS)
-q115: $(TARGETS_Q115)
-q115_constrained: $(TARGETS_Q115_CONSTRAINED)
-
-# ===============================
-# CPU targets
-# ===============================
-train_gpt2: train_gpt2.c
-	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $^ $(LDLIBS) $(OUTPUT_FILE)
-
-test_gpt2: test_gpt2.c
-	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $^ $(LDLIBS) $(OUTPUT_FILE)
 
 # ===============================
 # CUDA targets
@@ -140,47 +64,17 @@ $(NVCC_CUDNN): llmc/cudnn_att.cpp
 	$(NVCC) -c $(NVCC_FLAGS) $(PFLAGS) $< $(NVCC_INCLUDES) -o $@
 
 train_gpt2cu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-train_gpt2rawcu: train_gpt2_raw.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-train_gpt3cu: train_gpt3.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
 
 train_gpt2fp32cu: train_gpt2_fp32.cu
-	$(NVCC) $(NVCC_FLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
+	$(NVCC) $(NVCC_FLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
 
 test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-test_gpt2fp32cu: test_gpt2_fp32.cu
-	$(NVCC) $(NVCC_FLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-profile_gpt2cu: profile_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -lineinfo $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-# ===============================
-# Quantized CUDA targets (Q1.15)
-# ===============================
-train_gpt2q115cu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-train_gpt3q115cu: train_gpt3.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115 $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-# ===============================
-# Q1.15 Weight-Constrained CUDA
-# ===============================
-train_gpt2q115_constrainedcu: train_gpt2.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115_WEIGHT_CONSTRAINT $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
-
-train_gpt3q115_constrainedcu: train_gpt3.cu $(NVCC_CUDNN)
-	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) -DENABLE_Q115_WEIGHT_CONSTRAINT $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
+	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) -o $@
 
 # ===============================
 # Clean
 # ===============================
 clean:
-	$(REMOVE_FILES)
-	$(REMOVE_BUILD_OBJECT_FILES)
+	rm -f $(BUILD_DIR)/*.o
+	rm -f *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
