@@ -72,4 +72,4 @@ test_gpt2cu: test_gpt2.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $(NVCC_INCLUDES) $^ $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
 clean:
-	rm -f $(BUILD_DIR)/*.o *.o *.cu *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
+	rm -f $(BUILD_DIR)/*.o *.o *.out train_gpt2cu train_gpt2fp32cu test_gpt2cu
