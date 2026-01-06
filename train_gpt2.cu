@@ -477,13 +477,49 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
     // Allocate CPU memory for initialization
     floatX* params_memory_cpu = (floatX*)mallocCheck(model->num_parameters_bytes);
     
+    // Track tensor boundaries for per-tensor initialization scaling
+    size_t param_offsets[NUM_PARAMETER_TENSORS + 1];
+    param_offsets[0] = 0;
+    for (int t = 0; t < NUM_PARAMETER_TENSORS; t++) {
+        param_offsets[t + 1] = param_offsets[t] + model->param_elements[t];
+    }
+    
     for (size_t i = 0; i < model->num_parameters; i++) {
         // Simple random number generation (xorshift)
         seed ^= seed >> 12;
         seed ^= seed << 25;
         seed ^= seed >> 27;
         float random_val = (((seed * 0x2545F4914F6CDD1Dull) >> 32) / (float)UINT32_MAX) * 2.0f - 1.0f;
-        random_val *= init_scale; // Scale to [-0.1, 0.1]
+        
+        // Determine which tensor this parameter belongs to for per-tensor scaling
+        int tensor_id = 0;
+        for (int t = 0; t < NUM_PARAMETER_TENSORS; t++) {
+            if (i >= param_offsets[t] && i < param_offsets[t + 1]) {
+                tensor_id = t;
+                break;
+            }
+        }
+        
+        // Apply per-tensor initialization scaling for Q1.15 optimization
+        float tensor_scale = init_scale;
+#if defined(ENABLE_Q115)
+        switch (tensor_id) {
+            case 0:  // wte - token embeddings
+                tensor_scale = init_scale * Q115_WTE_INIT_SCALE;  // Scale up wte
+                break;
+            case 1:  // wpe - position embeddings
+                tensor_scale = init_scale * Q115_WPE_INIT_SCALE;  // Scale down wpe
+                break;
+            case 4:  // qkvw - QKV weights
+                tensor_scale = init_scale * Q115_QKV_INIT_SCALE;  // Increase QKV variance
+                break;
+            default:
+                tensor_scale = init_scale;
+                break;
+        }
+#endif
+        
+        random_val *= tensor_scale;
         
 #if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
         // Clamp to Q1.15 range [-1, 1) for weight-constrained training
@@ -1198,12 +1234,23 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
         // - the token embeddings are weight shared and participate in the final projection to logits
         // - the position embeddings actively participate at every forward/backward pass
 #if defined(ENABLE_Q115)
-        // For Q1.15 mode: exclude wte(0), attprojw(6), fcprojw(12) from weight decay
-        // This prevents amplitude collapse which contributes to the ~7.x loss wall
-        // Only apply weight decay to: wpe(1), qkvw(4), fcw(10)
-        float wd = (i == 1 || i == 4 || i == 10) ? weight_decay : 0.0f;
+        // For Q1.15 mode: ONLY apply weight decay to fcw(10)
+        // Disable WD on: wte(0), wpe(1), qkvw(4), attprojw(6), fcprojw(12)
+        // This prevents amplitude collapse which is critical for breaking the loss floor
+        // Weight decay shrinks attention logits -> entropy increases -> loss floor
+        // Q1.15 has no headroom for weight shrinkage
+        float wd = (i == 10) ? weight_decay : 0.0f;
+        
+        // Position embedding freezing: after Q115_WPE_FREEZE_STEP steps, freeze wpe
+        // This frees dynamic range for semantic embeddings and reduces interference noise
+        bool freeze_tensor = false;
+        if (i == 1 && t > Q115_WPE_FREEZE_STEP) {  // i == 1 is wpe
+            freeze_tensor = true;
+            wd = 0.0f;  // Also ensure no weight decay on frozen tensor
+        }
 #else
         float wd = (i == 0 || i == 1 || i == 4 || i == 6 || i == 10 || i == 12) ? weight_decay : 0.0f;
+        bool freeze_tensor = false;  // No freezing in non-Q115 mode
 #endif
         floatX* param_ptr = (floatX*)model->params_memory + local_offset_full;
         floatX* grad_ptr = (floatX*)model->grads_memory + local_offset_full;
@@ -1227,8 +1274,9 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
             // Clamp weights to Q1.15 range after initialization
             clamp_weights_q115(param_ptr, master_ptr, shard.size, tensor.size, shard.size, num_layers, main_stream);
 #endif
-        } else {
+        } else if (!freeze_tensor) {
             // ok finally call the kernel to update the weights with AdamW
+            // Skip update if tensor is frozen (e.g., wpe after Q115_WPE_FREEZE_STEP)
             adamw_update(param_ptr, master_ptr, grad_ptr,
                         m_ptr, v_ptr,
                         shard.size, tensor.size, tensor.size, shard.size, num_layers,

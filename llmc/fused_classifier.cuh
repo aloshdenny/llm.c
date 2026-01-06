@@ -12,13 +12,14 @@ Fused Classifier:
 #include "cuda_utils.cuh"
 #if defined(ENABLE_Q115)
 #include "q115_common.cuh"
-// Q1.15 logit scaling: Q1.15 stores values in [-1, 1), but logits need [-16, 16] range
+// Q1.15 logit scaling: Q1.15 stores values in [-1, 1), but logits need [-24, 24] range
 // This scale factor is applied before softmax to expand the effective range
-#define Q115_LOGIT_SCALE Q115_LOGITS_SCALE  // Use the scale from q115_common.cuh (16.0f)
+// INCREASED from 16.0 to 24.0 for better softmax expressivity (lower entropy)
+#define Q115_LOGIT_SCALE Q115_LOGITS_SCALE  // Use the scale from q115_common.cuh (24.0f)
 
 // Temperature for softmax - lower = more confident predictions
 // For Q1.15, we use temperature implicitly via Q115_LOGIT_SCALE
-// A scale of 16 means: Q1.15 value of 0.5 -> actual logit of 8.0
+// A scale of 24 means: Q1.15 value of 0.5 -> actual logit of 12.0
 #endif
 
 // ----------------------------------------------------------------------------

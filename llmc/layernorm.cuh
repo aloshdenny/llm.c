@@ -54,7 +54,8 @@ __global__ void rmsnorm_q_forward_kernel(floatX* __restrict__ out, float* __rest
     sum_sq = warpReduceSum(sum_sq);
     
     // RMS inverse: 1 / sqrt(mean(x^2) + eps)
-    float rms_inv = rsqrtf(sum_sq / C + 1e-5f);
+    // Use Q-aware epsilon (1e-3) instead of 1e-5 which is below Q1.15 resolution
+    float rms_inv = rsqrtf(sum_sq / C + Q115_LAYERNORM_EPS);
     
     if(lane_id == 0 && rstd != nullptr) {
         __stcs(rstd + idx, rms_inv);
@@ -67,6 +68,8 @@ __global__ void rmsnorm_q_forward_kernel(floatX* __restrict__ out, float* __rest
         float val = (float)__ldcs(x + c);
         float normalized = val * rms_inv;
         float result = normalized * (float)weight[c];
+        // Clamp activations to prevent rare spikes from poisoning fixed-point math
+        result = fmaxf(Q115_ACTIVATION_CLAMP_MIN, fminf(Q115_ACTIVATION_CLAMP_MAX, result));
         // Use scaled conversion to allow larger dynamic range
         // The scale factor allows values > 1.0 in the effective output
         __stcs(o + c, float_to_q115_scaled(result, Q115_ATTENTION_SCALE));
@@ -142,7 +145,8 @@ __global__ void layernorm_forward_kernel3(floatX* __restrict__ out, float* __res
     }
     sum_sq = warpReduceSum(sum_sq);
     
-    float rms_inv = rsqrtf(sum_sq / C + 1e-5f);
+    // Use Q-aware epsilon (1e-3) instead of default 1e-5
+    float rms_inv = rsqrtf(sum_sq / C + Q115_LAYERNORM_EPS);
     
     // Store 0 for mean (not used in RMSNorm) and rms_inv for rstd
     if(lane_id == 0 && mean != nullptr) {
@@ -153,12 +157,15 @@ __global__ void layernorm_forward_kernel3(floatX* __restrict__ out, float* __res
     }
 
     // Normalize and scale - use scaled Q1.15 for proper dynamic range
+    // Apply activation clamping to prevent rare spikes
     floatX* o = out + idx * C;
     for (int c = lane_id; c < C; c += WARP_SIZE) {
         float val = (float)__ldcs(x + c);
         float normalized = val * rms_inv;
         // Apply weight and bias
         float result = normalized * (float)weight[c] + (float)bias[c];
+        // Clamp activations to Q1.15-safe range
+        result = fmaxf(Q115_ACTIVATION_CLAMP_MIN, fminf(Q115_ACTIVATION_CLAMP_MAX, result));
         // Use scaled conversion to preserve dynamic range
         __stcs(o + c, float_to_q115_scaled(result, Q115_ATTENTION_SCALE));
     }
@@ -253,7 +260,8 @@ __global__ void layernorm_forward_kernel6(floatX* __restrict__ out, float* __res
     }
 
     sum_sq = warpReduceSum(sum_sq);
-    float rms_inv = rsqrtf(sum_sq / C + eps);
+    // Use Q-aware epsilon (1e-3) instead of default 1e-5
+    float rms_inv = rsqrtf(sum_sq / C + Q115_LAYERNORM_EPS);
 
     for(int c = threadIdx.x * x128::size; c < C; c += WARP_SIZE * x128::size) {
         const x128 in_data = s_in[c / x128::size];
@@ -263,7 +271,8 @@ __global__ void layernorm_forward_kernel6(floatX* __restrict__ out, float* __res
         for(int k = 0; k < x128::size; ++k) {
             float normalized = (float)in_data[k] * rms_inv;
             float o = normalized * (float)w[k] + (float)b[k];
-            o = fmaxf(-0.999f, fminf(0.999f, o));
+            // Clamp activations to Q1.15-safe range
+            o = fmaxf(Q115_ACTIVATION_CLAMP_MIN, fminf(Q115_ACTIVATION_CLAMP_MAX, o));
             out_data[k] = float_to_q115(o);
         }
         store128cs(out + c, out_data);
@@ -362,13 +371,16 @@ __global__ void fused_residual_forward_kernel5(floatX* residual, floatX* normed,
 #ifdef ENABLE_Q115
     // RMSNorm for Q1.15: compute residual and RMS in one pass
     // Use scaled Q1.15 conversions to preserve dynamic range
+    // Apply explicit residual branch scaling to prevent amplitude collapse
     float sum_sq = 0.0f;
     for(int c = threadIdx.x * x128::size; c < C; c += WARP_SIZE * x128::size) {
         const x128 in1 = load128cs(inp1 + c);
         const x128 in2 = load128cs(inp2 + c);
         x128 out;
         for(int k = 0; k < x128::size; ++k) {
-            float res_val = (float)in1[k] + (float)in2[k];
+            // Scale the branch output (in2) before adding to residual (in1)
+            // This prevents saturation and preserves head-wise variance
+            float res_val = (float)in1[k] + Q115_ATTENTION_RESIDUAL_SCALE * (float)in2[k];
             sum_sq += res_val * res_val;
             // Use scaled conversion for residual stream
             out[k] = float_to_q115_scaled(res_val, Q115_ATTENTION_SCALE);
@@ -378,7 +390,8 @@ __global__ void fused_residual_forward_kernel5(floatX* residual, floatX* normed,
     }
 
     sum_sq = warpReduceSum(sum_sq);
-    float rms_inv = rsqrtf(sum_sq / C + eps);
+    // Use Q-aware epsilon (1e-3) instead of default 1e-5
+    float rms_inv = rsqrtf(sum_sq / C + Q115_LAYERNORM_EPS);
 
     for(int c = threadIdx.x * x128::size; c < C; c += WARP_SIZE * x128::size) {
         const x128 res = s_res[c / x128::size];
@@ -390,6 +403,8 @@ __global__ void fused_residual_forward_kernel5(floatX* residual, floatX* normed,
             float res_float = q115_to_float_scaled(res[k], Q115_ATTENTION_SCALE);
             float normalized = res_float * rms_inv;
             float o = normalized * (float)w[k] + (float)b[k];
+            // Clamp activations to Q1.15-safe range
+            o = fmaxf(Q115_ACTIVATION_CLAMP_MIN, fminf(Q115_ACTIVATION_CLAMP_MAX, o));
             out[k] = float_to_q115_scaled(o, Q115_ATTENTION_SCALE);
         }
         store128cs(normed + c, out);
@@ -457,12 +472,15 @@ __global__ void residual_forward_kernel(floatX* out, const floatX* inp1, const f
     x128 packed_inp2 = load128cs(inp2 + idx);
     for (int k = 0; k < packed_inp1.size; k++) {
         // FP32 accumulation for residual stream
-        float res_val = (float)packed_inp1[k] + (float)packed_inp2[k];
 #ifdef ENABLE_Q115
-        // Clamp residual to Q1.15 range to prevent overflow
-        res_val = fmaxf(-0.999f, fminf(0.999f, res_val));
+        // Apply residual scaling to prevent amplitude collapse
+        // inp1 is the residual stream (scale 1.0), inp2 is the branch output (scaled down)
+        float res_val = (float)packed_inp1[k] + Q115_ATTENTION_RESIDUAL_SCALE * (float)packed_inp2[k];
+        // Clamp residual to prevent overflow while maintaining larger dynamic range
+        res_val = fmaxf(Q115_ACTIVATION_CLAMP_MIN, fminf(Q115_ACTIVATION_CLAMP_MAX, res_val));
         packed_out[k] = float_to_q115(res_val);
 #else
+        float res_val = (float)packed_inp1[k] + (float)packed_inp2[k];
         packed_out[k] = (floatX)res_val;
 #endif
     }
