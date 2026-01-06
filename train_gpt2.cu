@@ -1456,10 +1456,12 @@ void write_checkpoint(const char* output_log_dir, int step, GPT2* model, DataLoa
     // only rank 0 writes the model file because it is the same across all ranks
     if (rank == 0) {
         snprintf(filename_buffer, sizeof(filename_buffer), "%s/model_%08d.bin", output_log_dir, step);
+        snprintf(filename_buffer, sizeof(filename_buffer), "%s/state_%08d_%05d.bin", output_log_dir, step, rank);
         gpt2_write_to_checkpoint(model, filename_buffer);
     }
     // all ranks write their state file
     snprintf(filename_buffer, sizeof(filename_buffer), "%s/state_%08d_%05d.bin", output_log_dir, step, rank);
+    snprintf(filename_buffer, sizeof(filename_buffer), "mnt/fineweb-10b/llm.c/state_%08d_%05d.bin", step, rank);
     save_state(filename_buffer, step, model, train_loader);
     // DONE file is a signal that this checkpoint as a whole is complete
     multi_gpu_barrier(multi_gpu_config);
@@ -2077,6 +2079,10 @@ int main(int argc, char *argv[]) {
     multi_gpu_config_free(&multi_gpu_config);
     gpt2_free(&model);
     common_free(model);
+    if (multi_gpu_config.process_rank == 0) {
+    gpt2_write_to_checkpoint(&model,
+        "mnt/fineweb-10b/llm.c/model_final.bin");
+    }
     return 0;
 }
 #endif
