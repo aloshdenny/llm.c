@@ -24,8 +24,14 @@ else
   PFLAGS = -DENABLE_BF16
 endif
 
-.PHONY: all clean libsyms run
+.PHONY: all clean libsyms run q131 q115
 all: train_gpt2cu
+
+# Q1.31 fixed-point build (32-bit weights, higher precision)
+q131: train_gpt2q131cu
+
+# Q1.15 fixed-point build (16-bit weights, legacy)
+q115: train_gpt2q115cu
 
 # Create local linker + runtime symlinks (no changes to system dirs)
 libsyms:
@@ -42,10 +48,18 @@ train_gpt2cu: train_gpt2.cu libsyms
 train_gpt2fp32cu: train_gpt2_fp32.cu libsyms
 	$(NVCC) $(NVCC_FLAGS) $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
 
+# Q1.31 fixed-point build (32-bit, higher precision than Q1.15)
+train_gpt2q131cu: train_gpt2.cu libsyms
+	$(NVCC) $(NVCC_FLAGS) -DENABLE_Q131 -DFIXED_POINT_Q31 $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
+
+# Q1.15 fixed-point build (16-bit, legacy)
+train_gpt2q115cu: train_gpt2.cu libsyms
+	$(NVCC) $(NVCC_FLAGS) -DENABLE_Q115 $(NVCC_INCLUDES) $< $(NVCC_LDFLAGS) $(NVCC_LDLIBS) -o $@
+
 # Convenience run (should work even when invoked manually as ./train_gpt2cu)
 run: train_gpt2cu
 	./train_gpt2cu --help
 
 clean:
-	rm -f train_gpt2cu train_gpt2fp32cu *.o \
+	rm -f train_gpt2cu train_gpt2fp32cu train_gpt2q131cu train_gpt2q115cu *.o \
 	      libcublas.so libcublas.so.12 libcublasLt.so libcublasLt.so.12 libnvml.so libnvml.so.1

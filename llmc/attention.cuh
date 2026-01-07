@@ -8,6 +8,8 @@ Attention, as a fallback when we do not use the Flash Attention from cuDNN
 #include "cublas_common.h"
 #if defined(ENABLE_Q115)
 #include "q115_common.cuh"
+#elif defined(ENABLE_Q131)
+#include "q131_common.cuh"
 #endif
 
 // ----------------------------------------------------------------------------
@@ -116,18 +118,29 @@ __global__ void softmax_forward_kernel5(floatX* out, float inv_temperature, cons
     float maxval = -flt_max;
     float sumval = 0.0f;
 
-#ifdef ENABLE_Q115
+#if defined(ENABLE_Q131)
+    // For Q1.31: scale attention scores to expand dynamic range
+    const float q131_att_scale = 8.0f;  // Expand Q1.31 attention score range
+#elif defined(ENABLE_Q115)
     // For Q1.15: scale attention scores to expand dynamic range
     const float q115_att_scale = 4.0f;  // Expand Q1.15 attention score range
 #else
     const float q115_att_scale = 1.0f;
 #endif
 
+#if defined(ENABLE_Q131)
+    const float att_scale = q131_att_scale;
+#elif defined(ENABLE_Q115)
+    const float att_scale = q115_att_scale;
+#else
+    const float att_scale = 1.0f;
+#endif
+
     const floatX* x_aligned = reinterpret_cast<const floatX*>(__builtin_assume_aligned(x, 16));
     for (int i = lane_id; i < pos_by_4; i += WARP_SIZE) {
         float regarray[4];
         for (int k = 0; k < 4; ++k) {
-            regarray[k] = (float)x_aligned[4*i + k] * q115_att_scale;
+            regarray[k] = (float)x_aligned[4*i + k] * att_scale;
         }
         float old_maxval = maxval;
         for(int k = 0; k < 4; ++k) {
@@ -141,7 +154,7 @@ __global__ void softmax_forward_kernel5(floatX* out, float inv_temperature, cons
 
     if(4*pos_by_4 + lane_id <= own_pos) {
         float old_maxval = maxval;
-        float scaled_val = (float)x[4*pos_by_4 + lane_id] * q115_att_scale;
+        float scaled_val = (float)x[4*pos_by_4 + lane_id] * att_scale;
         maxval = fmaxf(maxval, scaled_val);
         sumval *= expf(inv_temperature * (old_maxval - maxval));
         sumval += expf(inv_temperature * (scaled_val - maxval));
@@ -156,7 +169,7 @@ __global__ void softmax_forward_kernel5(floatX* out, float inv_temperature, cons
     // divide the whole row by the sum
     for (int i = lane_id; i <= own_pos; i += WARP_SIZE) {
         // recalculation is faster than doing the round-trip through memory.
-        float ev = expf(inv_temperature * ((float)__ldcs(x + i) * q115_att_scale - global_maxval));
+        float ev = expf(inv_temperature * ((float)__ldcs(x + i) * att_scale - global_maxval));
         __stcs(out + idx * T + i, (floatX)(ev * norm));
     }
 }

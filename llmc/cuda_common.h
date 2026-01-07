@@ -81,11 +81,17 @@ enum PrecisionMode
     PRECISION_FP32,
     PRECISION_FP16,
     PRECISION_BF16,
-    PRECISION_Q115
+    PRECISION_Q115,
+    PRECISION_Q131
 };
 
+// Compile-time guard: Q1.15 and Q1.31 are mutually exclusive
+#if defined(ENABLE_Q115) && defined(ENABLE_Q131)
+#error "Cannot enable both Q1.15 and Q1.31 modes simultaneously. Choose one."
+#endif
+
 // Unified fixed-point mode flag - set when any fixed-point format is enabled
-#if defined(ENABLE_Q115)
+#if defined(ENABLE_Q115) || defined(ENABLE_Q131)
 #define ENABLE_FIXED_POINT 1
 #endif
 
@@ -98,10 +104,15 @@ typedef float floatX;
 typedef half floatX;
 #define PRECISION_MODE PRECISION_FP16
 #elif defined(ENABLE_Q115)
-// Q1.15 fixed-point mode
+// Q1.15 fixed-point mode (16-bit)
 #include <stdint.h>
 typedef int16_t floatX; // Q1.15 represented as int16_t
 #define PRECISION_MODE PRECISION_Q115
+#elif defined(ENABLE_Q131)
+// Q1.31 fixed-point mode (32-bit) - higher precision than Q1.15
+#include <stdint.h>
+typedef int32_t floatX; // Q1.31 represented as int32_t
+#define PRECISION_MODE PRECISION_Q131
 #else // Default to bfloat16
 typedef __nv_bfloat16 floatX;
 #define PRECISION_MODE PRECISION_BF16

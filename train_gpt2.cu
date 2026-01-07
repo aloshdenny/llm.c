@@ -502,7 +502,23 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
         
         // Apply per-tensor initialization scaling for Q1.15 optimization
         float tensor_scale = init_scale;
-#if defined(ENABLE_Q115)
+#if defined(ENABLE_Q131)
+        // Q1.31 has higher precision, less aggressive scaling needed
+        switch (tensor_id) {
+            case 0:  // wte - token embeddings
+                tensor_scale = init_scale * 1.0f;  // No extra scaling for Q1.31
+                break;
+            case 1:  // wpe - position embeddings  
+                tensor_scale = init_scale * 1.0f;  // No extra scaling for Q1.31
+                break;
+            case 4:  // qkvw - QKV weights
+                tensor_scale = init_scale * 1.0f;  // No extra scaling for Q1.31
+                break;
+            default:
+                tensor_scale = init_scale;
+                break;
+        }
+#elif defined(ENABLE_Q115)
         switch (tensor_id) {
             case 0:  // wte - token embeddings
                 tensor_scale = init_scale * Q115_WTE_INIT_SCALE;  // Scale up wte
@@ -521,18 +537,29 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
         
         random_val *= tensor_scale;
         
-#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+#if defined(ENABLE_Q131)
+        // Clamp to Q1.31 range [-1, 1) and convert
+        random_val = fmaxf(-1.0f, fminf(0.9999999995f, random_val));
+#elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
         // Clamp to Q1.15 range [-1, 1) for weight-constrained training
         random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
 #endif
         
-        #if PRECISION_MODE == PRECISION_FP32
+#if defined(ENABLE_Q131)
+        // For Q1.31: convert float to Q1.31 fixed-point format
+        // Q1.31 stores values in [-1, 1) as 32-bit signed integers
+        // Scale: multiply by 2^31 and store as int32
+        double clamped = fmax(-1.0, fmin(0.9999999995, (double)random_val));
+        int32_t q131_val = (int32_t)(clamped * 2147483648.0);
+        params_memory_cpu[i] = q131_val;
+#elif PRECISION_MODE == PRECISION_FP32
             params_memory_cpu[i] = random_val;
         #elif PRECISION_MODE == PRECISION_BF16
             params_memory_cpu[i] = (floatX)random_val;
         #else
             params_memory_cpu[i] = (floatX)random_val;
         #endif
+#endif
     }
     
     // Copy initialized parameters to GPU
@@ -1233,7 +1260,12 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
         // in particular this also decays the embedding weights, but this is ok:
         // - the token embeddings are weight shared and participate in the final projection to logits
         // - the position embeddings actively participate at every forward/backward pass
-#if defined(ENABLE_Q115)
+#if defined(ENABLE_Q131)
+        // For Q1.31 mode: standard weight decay on 2D tensors
+        // Q1.31 has much more precision, so standard weight decay is fine
+        float wd = (i == 0 || i == 1 || i == 4 || i == 6 || i == 10 || i == 12) ? weight_decay : 0.0f;
+        bool freeze_tensor = false;  // No freezing in Q1.31 mode
+#elif defined(ENABLE_Q115)
         // For Q1.15 mode: ONLY apply weight decay to fcw(10)
         // Disable WD on: wte(0), wpe(1), qkvw(4), attprojw(6), fcprojw(12)
         // This prevents amplitude collapse which is critical for breaking the loss floor
@@ -1700,24 +1732,28 @@ int main(int argc, char *argv[]) {
         else { error_usage(); }
     }
 
-    // Validate quantization mode if requested via -q 115
+    // Validate quantization mode if requested via -q 115 or -q 131
     if (requested_quant_mode != 0) {
         int compiled_mode = 0;
-#if defined(ENABLE_Q115)
+#if defined(ENABLE_Q131)
+        compiled_mode = 131;
+#elif defined(ENABLE_Q115)
         compiled_mode = 115;
 #endif
         if (compiled_mode == 0) {
-            fprintf(stderr, "ERROR: Requested quantization mode Q1.15 but binary was compiled without quantization.\n");
-            fprintf(stderr, "       Use 'make q115' for Q1.15 build.\n");
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled without quantization.\n",
+                    requested_quant_mode == 115 ? 15 : 31);
+            fprintf(stderr, "       Use 'make q115' for Q1.15 build, or 'make q131' for Q1.31 build.\n");
             exit(EXIT_FAILURE);
         }
         if (compiled_mode != requested_quant_mode) {
-            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled with Q1.15.\n",
-                    requested_quant_mode == 115 ? 15 : 31);
-            fprintf(stderr, "       Use the correct binary: train_gpt2q115cu\n");
+            fprintf(stderr, "ERROR: Requested quantization mode Q1.%d but binary was compiled with Q1.%d.\n",
+                    requested_quant_mode == 115 ? 15 : 31,
+                    compiled_mode == 115 ? 15 : 31);
+            fprintf(stderr, "       Use the correct binary: train_gpt2q%dcu\n", compiled_mode);
             exit(EXIT_FAILURE);
         }
-        printf("Quantization mode Q1.15 verified.\n");
+        printf("Quantization mode Q1.%d verified.\n", compiled_mode == 115 ? 15 : 31);
     }
 
     multi_gpu_config = multi_gpu_config_init(num_processes, process_rank, gpus_per_node, server_ip, fs_path, nccl_init_method);
@@ -1770,11 +1806,14 @@ int main(int argc, char *argv[]) {
     const char* precision_str = (PRECISION_MODE == PRECISION_FP32)
                               ? (cublas_compute == CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : "FP32")
                               : (PRECISION_MODE == PRECISION_FP16 ? "FP16" 
-                                : (PRECISION_MODE == PRECISION_Q115 ? "Q1.15" : "BF16"));
+                                : (PRECISION_MODE == PRECISION_Q115 ? "Q1.15"
+                                  : (PRECISION_MODE == PRECISION_Q131 ? "Q1.31" : "BF16")));
     printf0("| device                | %-50s |\n", deviceProp.name);
     printf0("| peak TFlops           | %-50.1f |\n", get_flops_promised(deviceProp.name, PRECISION_MODE));
     printf0("| precision             | %-50s |\n", precision_str);
-#if defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+#if defined(ENABLE_Q131)
+    printf0("| fixed-point mode      | %-50s |\n", "Q1.31 (32-bit, scale=2^31)");
+#elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
     printf0("| weight constraint     | %-50s |\n", "Q1.15 range [-1, 1) enabled");
 #endif
     printf0("+-----------------------+----------------------------------------------------+\n");
@@ -2070,7 +2109,10 @@ int main(int argc, char *argv[]) {
             printf0("skipping update due to grad z-score of %f\n", zgrad);
         } else {
             // clip the gradient norm to a maximum value
-#if defined(ENABLE_Q115)
+#if defined(ENABLE_Q131)
+            // Q1.31 can handle larger gradients due to higher precision
+            float grad_clip = 1.0f;
+#elif defined(ENABLE_Q115)
             // Lower grad clip for Q1.15 to prevent large updates that can destabilize training
             float grad_clip = 0.5f;
 #else
