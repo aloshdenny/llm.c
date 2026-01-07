@@ -8,6 +8,11 @@
 
 typedef int32_t q131_t;
 
+// LayerNorm epsilon for Q1.31 paths (kept small; LN math is still float).
+#ifndef Q131_LAYERNORM_EPS
+#define Q131_LAYERNORM_EPS 1e-5f
+#endif
+
 // Scale factor for mapping float in [-1,1) to Q1.31 integer.
 // Note: 2^31 does not fit in int32, so we use int64 constants.
 constexpr int64_t Q131_SCALE_I64 = (1LL << 31);
@@ -15,6 +20,27 @@ constexpr double  Q131_SCALE_D   = 2147483648.0; // 2^31
 
 __device__ __forceinline__ float q131_to_float(q131_t v) {
     return (float)((double)v / Q131_SCALE_D);
+}
+
+// Historical name used in kernels.
+__device__ __forceinline__ q131_t float_to_q131(float x) {
+    return float_to_q131_rne(x);
+}
+
+// Saturating add (Q1.31 + Q1.31 -> Q1.31).
+__device__ __forceinline__ q131_t q131_add(q131_t a, q131_t b) {
+    int64_t s = (int64_t)a + (int64_t)b;
+    if (s > 0x7fffffffLL) s = 0x7fffffffLL;
+    if (s < (long long)0x80000000LL) s = (long long)0x80000000LL;
+    return (q131_t)s;
+}
+
+// Saturating subtract.
+__device__ __forceinline__ q131_t q131_sub(q131_t a, q131_t b) {
+    int64_t s = (int64_t)a - (int64_t)b;
+    if (s > 0x7fffffffLL) s = 0x7fffffffLL;
+    if (s < (long long)0x80000000LL) s = (long long)0x80000000LL;
+    return (q131_t)s;
 }
 
 // Round-to-nearest-even (RNE) conversion.

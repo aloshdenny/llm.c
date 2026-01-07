@@ -466,6 +466,12 @@ typedef struct {
 #endif
 } GPT2;
 
+// Forward declarations (used by FIXED_POINT_Q31 helper code earlier in this TU)
+ShardInfo gpt2_get_tensor_at_layer(const GPT2 *model, int layer_id, int param_tensor_id);
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+ShardInfo gpt2_get_q31_tensor_at_layer(const GPT2 *model, int layer_id, int param_tensor_id);
+#endif
+
 void gpt2_init_common(GPT2 *model) {
     // common inits outside of the model weights
     // memory lazily initialized in forward()
