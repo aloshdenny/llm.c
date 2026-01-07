@@ -2092,6 +2092,14 @@ int main(int argc, char *argv[]) {
         else { error_usage(); }
     }
 
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    if (use_master_weights == 0) {
+        fprintf(stderr, "ERROR: FIXED_POINT_Q31 requires FP32 master weights (-w 1).\n");
+        fprintf(stderr, "       This mode does FP32 AdamW updates then requantizes to canonical Q1.31 once per step.\n");
+        exit(EXIT_FAILURE);
+    }
+#endif
+
     // Validate quantization mode if requested via -q 115 or -q 131
     if (requested_quant_mode != 0) {
         int compiled_mode = 0;
@@ -2557,8 +2565,9 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "ERROR: Q31 weights look truncated (max_abs=%u <= 2^15).\n", max_abs);
                 exit(EXIT_FAILURE);
             }
-            if (low16_nz == 0ULL) {
+            if (low16_nz == 0ULL && model.use_master_weights) {
                 fprintf(stderr, "ERROR: Q31 weights look Q15-shifted (all low16 bits zero).\n");
+                fprintf(stderr, "       If you intended to run without master weights, this check is not meaningful.\n");
                 exit(EXIT_FAILURE);
             }
         }
