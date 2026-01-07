@@ -468,11 +468,15 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
     // Allocate memory for parameters
     gpt2_allocate_weights(model);
     
-    // Initialize with small random values in Q1.15 format
-    // For Q1.15: scale initialization to prevent overflow, values closer to zero
-    // Using scaled initialization: range approximately [-0.1, 0.1] to be safe
+    // Initialize with appropriate random values for Q1.31 format
+    // Q1.31 has much higher precision than Q1.15, can use larger scales
+    // Using initialization similar to standard neural network practice
     uint64_t seed = 12345;
+#if defined(ENABLE_Q131)
+    float init_scale = 0.02f; // Conservative but reasonable scale for Q1.31
+#else
     float init_scale = 0.1f; // Conservative scale for Q1.15
+#endif
     
     // Allocate CPU memory for initialization
     floatX* params_memory_cpu = (floatX*)mallocCheck(model->num_parameters_bytes);
@@ -539,13 +543,17 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
         
 #if defined(ENABLE_Q131)
         // Clamp to Q1.31 range [-1, 1) and convert
-        random_val = fmaxf(-1.0f, fminf(0.9999999995f, random_val));
+        random_val = fmaxf(-1.0f, fminf(0.9999999f, random_val));
         // For Q1.31: convert float to Q1.31 fixed-point format
         // Q1.31 stores values in [-1, 1) as 32-bit signed integers
         // Scale: multiply by 2^31 and store as int32
-        double clamped = fmax(-1.0, fmin(0.9999999995, (double)random_val));
-        int32_t q131_val = (int32_t)(clamped * 2147483648.0);
+        int32_t q131_val = (int32_t)(random_val * 2147483648.0);
         params_memory_cpu[i] = q131_val;
+        
+        // Debug: print some sample values to verify conversion
+        if (i < 10) {
+            printf0("Debug init[%zu]: float=%f -> q131=%d\n", i, random_val, q131_val);
+        }
 #elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
         // Clamp to Q1.15 range [-1, 1) for weight-constrained training
         random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
@@ -583,8 +591,8 @@ void gpt2_write_to_checkpoint(GPT2 *model, const char* checkpoint_path) {
     int model_header[256];
     memset(model_header, 0, sizeof(model_header));
     model_header[0] = 20240326; // magic number
-    assert(PRECISION_MODE == PRECISION_FP32 || PRECISION_MODE == PRECISION_BF16);
-    model_header[1] = PRECISION_MODE == PRECISION_FP32 ? 3 : 5; // version
+    assert(PRECISION_MODE == PRECISION_FP32 || PRECISION_MODE == PRECISION_BF16 || PRECISION_MODE == PRECISION_Q131);
+    model_header[1] = (PRECISION_MODE == PRECISION_FP32) ? 3 : (PRECISION_MODE == PRECISION_Q131) ? 6 : 5; // version
     model_header[2] = model->config.max_seq_len;
     model_header[3] = model->config.vocab_size;
     model_header[4] = model->config.num_layers;
@@ -672,6 +680,15 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
             fprintf(stderr, "---> HINT: to turn on FP32 you have to compile like: `make train_gpt2cu PRECISION=FP32`\n");
             fprintf(stderr, "---> HINT: are you sure you're loading a .bin file without any _bf16 in the name?\n");
             exit(EXIT_FAILURE);
+        }
+        if ((PRECISION_MODE == PRECISION_Q115 || PRECISION_MODE == PRECISION_Q131) && !(version == 3 || version == 5)) {
+            fprintf(stderr, "Precision is configured as Q1.15/Q1.31 but checkpoint version %d is not supported.\n", version);
+            fprintf(stderr, "---> HINT: Q1.15/Q1.31 training uses random initialization, not checkpoint loading\n");
+            fprintf(stderr, "---> Falling back to random initialization...\n");
+            fclose(model_file);
+            printf0("Initializing random Q1.31 weights\n");
+            gpt2_init_random(model, 1024, 50257, 12, 12, 768);
+            return;
         }
     }
 
