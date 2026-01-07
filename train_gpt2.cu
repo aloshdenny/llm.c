@@ -237,17 +237,21 @@ __global__ void q31_stats_kernel(const q131_t* w, size_t n, unsigned int* max_ab
 }
 
 template <typename Tp>
-__global__ void sum_sumsq_kernel(const Tp* x, size_t n, double* sum_out, double* sumsq_out) {
-    double thread_sum = 0.0;
-    double thread_sumsq = 0.0;
+__global__ void sum_sumsq_kernel(const Tp* x, size_t n, float* sum_out, float* sumsq_out) {
+    float thread_sum = 0.0f;
+    float thread_sumsq = 0.0f;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)blockDim.x * gridDim.x) {
-        double v = (double)(float)x[i];
+        float v = (float)x[i];
         thread_sum += v;
         thread_sumsq += v * v;
     }
-    // atomics are OK for diagnostics
-    atomicAdd(sum_out, thread_sum);
-    atomicAdd(sumsq_out, thread_sumsq);
+    // Reduce within block, then one atomicAdd per block.
+    float block_sum = blockReduce<warpReduceSum>(thread_sum);
+    float block_sumsq = blockReduce<warpReduceSum>(thread_sumsq);
+    if (threadIdx.x == 0) {
+        atomicAdd(sum_out, block_sum);
+        atomicAdd(sumsq_out, block_sumsq);
+    }
 }
 #endif
 
@@ -2218,12 +2222,12 @@ int main(int argc, char *argv[]) {
 
 #if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
     // Diagnostics buffers (device)
-    double* d_logit_sum = nullptr;
-    double* d_logit_sumsq = nullptr;
+    float* d_logit_sum = nullptr;
+    float* d_logit_sumsq = nullptr;
     unsigned int* d_q31_max_abs = nullptr;
     unsigned long long* d_q31_low16_nz = nullptr;
-    cudaCheck(cudaMalloc((void**)&d_logit_sum, sizeof(double)));
-    cudaCheck(cudaMalloc((void**)&d_logit_sumsq, sizeof(double)));
+    cudaCheck(cudaMalloc((void**)&d_logit_sum, sizeof(float)));
+    cudaCheck(cudaMalloc((void**)&d_logit_sumsq, sizeof(float)));
     cudaCheck(cudaMalloc((void**)&d_q31_max_abs, sizeof(unsigned int)));
     cudaCheck(cudaMalloc((void**)&d_q31_low16_nz, sizeof(unsigned long long)));
 #endif
@@ -2461,8 +2465,8 @@ int main(int argc, char *argv[]) {
 
 #if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
         // reset per-step diagnostics accumulators
-        cudaCheck(cudaMemsetAsync(d_logit_sum, 0, sizeof(double), main_stream));
-        cudaCheck(cudaMemsetAsync(d_logit_sumsq, 0, sizeof(double), main_stream));
+        cudaCheck(cudaMemsetAsync(d_logit_sum, 0, sizeof(float), main_stream));
+        cudaCheck(cudaMemsetAsync(d_logit_sumsq, 0, sizeof(float), main_stream));
 #endif
         // gradient and loss accumulation loop over micro-batches
         for (int micro_step = 0; micro_step < grad_accum_steps; micro_step++) {
@@ -2523,12 +2527,12 @@ int main(int argc, char *argv[]) {
 
 #if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
         // Print per-step logit stddev (computed from final micro-step logits)
-        double h_sum = 0.0, h_sumsq = 0.0;
-        cudaCheck(cudaMemcpy(&h_sum, d_logit_sum, sizeof(double), cudaMemcpyDeviceToHost));
-        cudaCheck(cudaMemcpy(&h_sumsq, d_logit_sumsq, sizeof(double), cudaMemcpyDeviceToHost));
+        float h_sum = 0.0f, h_sumsq = 0.0f;
+        cudaCheck(cudaMemcpy(&h_sum, d_logit_sum, sizeof(float), cudaMemcpyDeviceToHost));
+        cudaCheck(cudaMemcpy(&h_sumsq, d_logit_sumsq, sizeof(float), cudaMemcpyDeviceToHost));
         size_t N = (size_t)B * (size_t)T * (size_t)model.config.padded_vocab_size;
-        double mean = h_sum / (double)N;
-        double var = h_sumsq / (double)N - mean * mean;
+        double mean = (double)h_sum / (double)N;
+        double var = (double)h_sumsq / (double)N - mean * mean;
         double std = sqrt(var > 0.0 ? var : 0.0);
         printf0("Q31 diag | step %d | logits_std %.6f\n", step + 1, (float)std);
 

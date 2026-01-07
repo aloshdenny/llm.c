@@ -39,7 +39,9 @@ extern cudaDeviceProp deviceProp;
 #endif
 
 // convenience macro for calculating grid/block dimensions for kernels
+#ifndef CEIL_DIV
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
+#endif
 
 // short-cuts for compile-time boolean values that can be used as function arguments
 constexpr std::bool_constant<true> True;
