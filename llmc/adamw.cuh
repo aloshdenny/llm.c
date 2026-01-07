@@ -93,12 +93,10 @@ __device__ void adamw_update(Tp* params_memory, float* master_params_memory, Tg*
     
     // fetch the old value of this parameter as a float
     float old_param;
-#if defined(ENABLE_Q131)
-    // In Q1.31 mode, Tp is int32_t (q131_t)
+#if defined(ENABLE_Q131) && !defined(FIXED_POINT_Q31)
+    // In true Q1.31 mode, Tp is int32_t (q131_t)
     if constexpr (sizeof(Tp) == 4) {
-        // Convert from Q1.31 to float
         old_param = q131_to_float(params_memory[idx]);
-        // Use master weights if available (for higher precision accumulation)
         if (master_params_memory != NULL) {
             old_param = master_params_memory[idx];
         }

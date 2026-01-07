@@ -58,6 +58,10 @@ GPT-2 Transformer Neural Net training loop. See README.md for usage.
 // WARP_SIZE, MAX_1024_THREADS_BLOCKS, CEIL_DIV, cudaCheck, PRECISION_MODE
 // NVTX_RANGE_FN
 #include "llmc/cuda_common.h"
+#if defined(ENABLE_Q131)
+// Q1.31 helper conversions (used by FIXED_POINT_Q31 weight-constraint mode)
+#include "llmc/q131_common.cuh"
+#endif
 // defines:
 // Packed128, f128, x128
 // warpReduceSum, warpReduceMax, blockReduce, copy_and_cast_kernel, cudaMallocConditionallyManaged
@@ -137,6 +141,115 @@ typedef struct {
     floatX* lnfb; // (C)
 } ParameterTensors;
 static_assert(sizeof(ParameterTensors) == NUM_PARAMETER_TENSORS * sizeof(void*), "Inconsistent sizes!");
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+// Canonical Q1.31 storage for selected parameter tensors.
+// Non-quantized tensors will have 0 elements and nullptr pointers.
+typedef struct {
+    q131_t* wte;      // (V, C)
+    q131_t* wpe;      // (maxT, C)
+    q131_t* ln1w;     // (L, C) [unused]
+    q131_t* ln1b;     // (L, C) [unused]
+    q131_t* qkvw;     // (L, 3*C, C)
+    q131_t* qkvb;     // (L, 3*C) [unused]
+    q131_t* attprojw; // (L, C, C)
+    q131_t* attprojb; // (L, C) [unused]
+    q131_t* ln2w;     // (L, C) [unused]
+    q131_t* ln2b;     // (L, C) [unused]
+    q131_t* fcw;      // (L, 4*C, C)
+    q131_t* fcb;      // (L, 4*C) [unused]
+    q131_t* fcprojw;  // (L, C, 4*C)
+    q131_t* fcprojb;  // (L, C) [unused]
+    q131_t* lnfw;     // (C) [unused]
+    q131_t* lnfb;     // (C) [unused]
+} Q31ParameterTensors;
+static_assert(sizeof(Q31ParameterTensors) == NUM_PARAMETER_TENSORS * sizeof(void*), "Inconsistent sizes!");
+
+__host__ __forceinline__ bool tensor_is_q31_weight(int tensor_id) {
+    // Quantize only weight matrices + embeddings.
+    return (tensor_id == 0 || tensor_id == 1 || tensor_id == 4 || tensor_id == 6 || tensor_id == 10 || tensor_id == 12);
+}
+
+// Quantize float weights -> Q1.31, store canonical Q31, and dequant back into params/master.
+template <typename Tp>
+__global__ void quantize_store_dequant_q31_kernel(Tp* params_memory, float* master_params_memory, q131_t* q31_memory,
+                                                 size_t num_parameters, ptrdiff_t w_stride, ptrdiff_t s_stride) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_parameters) { return; }
+    params_memory += blockIdx.y * w_stride;
+    q31_memory += blockIdx.y * w_stride;
+
+    float x = (float)params_memory[idx];
+    if (master_params_memory != nullptr) {
+        master_params_memory += blockIdx.y * s_stride;
+        x = master_params_memory[idx];
+    }
+    q131_t q = float_to_q131_rne(x);
+    q31_memory[idx] = q;
+    float dq = q131_to_float(q);
+    params_memory[idx] = (Tp)dq;
+    if (master_params_memory != nullptr) {
+        master_params_memory[idx] = dq;
+    }
+}
+
+template <typename Tp>
+__global__ void dequant_q31_to_params_kernel(Tp* params_memory, float* master_params_memory, const q131_t* q31_memory,
+                                            size_t num_parameters, ptrdiff_t w_stride, ptrdiff_t s_stride) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_parameters) { return; }
+    params_memory += blockIdx.y * w_stride;
+    q31_memory += blockIdx.y * w_stride;
+
+    float dq = q131_to_float(q31_memory[idx]);
+    params_memory[idx] = (Tp)dq;
+    if (master_params_memory != nullptr) {
+        master_params_memory += blockIdx.y * s_stride;
+        master_params_memory[idx] = dq;
+    }
+}
+
+// Diagnostics: max-abs and count of entries with low-16 bits nonzero.
+__global__ void q31_stats_kernel(const q131_t* w, size_t n, unsigned int* max_abs_out, unsigned long long* low16_nz_out) {
+    __shared__ unsigned int block_max;
+    __shared__ unsigned int block_low16;
+    if (threadIdx.x == 0) { block_max = 0; block_low16 = 0; }
+    __syncthreads();
+
+    unsigned int thread_max = 0;
+    unsigned int thread_low16 = 0;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)blockDim.x * gridDim.x) {
+        int32_t v = w[i];
+        unsigned int a = (unsigned int)(v < 0 ? -(int64_t)v : (int64_t)v);
+        thread_max = (a > thread_max) ? a : thread_max;
+        if (((unsigned int)v & 0xFFFFu) != 0u) {
+            thread_low16++;
+        }
+    }
+    // reduce within block (simple atomics; diagnostics only)
+    atomicMax(&block_max, thread_max);
+    atomicAdd(&block_low16, thread_low16);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        atomicMax(max_abs_out, block_max);
+        atomicAdd(low16_nz_out, (unsigned long long)block_low16);
+    }
+}
+
+template <typename Tp>
+__global__ void sum_sumsq_kernel(const Tp* x, size_t n, double* sum_out, double* sumsq_out) {
+    double thread_sum = 0.0;
+    double thread_sumsq = 0.0;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)blockDim.x * gridDim.x) {
+        double v = (double)(float)x[i];
+        thread_sum += v;
+        thread_sumsq += v * v;
+    }
+    // atomics are OK for diagnostics
+    atomicAdd(sum_out, thread_sum);
+    atomicAdd(sumsq_out, thread_sumsq);
+}
+#endif
 
 void fill_in_parameter_sizes(size_t* param_sizes, size_t* param_sizeof, GPT2Config config) {
     size_t Vp = config.padded_vocab_size;
@@ -342,6 +455,15 @@ typedef struct {
     // todo - if other functions need cpu scratch buffers in the future, reuse as generic scratch?
     int* workload_indices; // encoder_backward, B*T*num_c_groups (int)
     int4* bucket_info;     // encoder_backward, B*T*num_c_groups (int4) - size for worst case
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // Canonical Q1.31 storage for selected weight tensors
+    Q31ParameterTensors q31_params;
+    size_t q31_param_elements[NUM_PARAMETER_TENSORS];
+    void* q31_params_memory;
+    size_t q31_num_parameters;
+    size_t q31_num_parameters_bytes;
+#endif
 } GPT2;
 
 void gpt2_init_common(GPT2 *model) {
@@ -365,6 +487,13 @@ void gpt2_init_common(GPT2 *model) {
     model->m_memory = NULL;
     model->v_memory = NULL;
     model->master_weights = NULL;
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    model->q31_params_memory = NULL;
+    model->q31_num_parameters = 0;
+    model->q31_num_parameters_bytes = 0;
+    memset(&model->q31_params, 0, sizeof(model->q31_params));
+    memset(model->q31_param_elements, 0, sizeof(model->q31_param_elements));
+#endif
     // other default settings
     model->rng_state = 13371337 + multi_gpu_config.process_rank; // used in stochastic rounding
     model->use_master_weights = 1; // safe default: do keep master weights in fp32
@@ -372,6 +501,63 @@ void gpt2_init_common(GPT2 *model) {
     model->recompute = 1; // good default: recompute gelu but not layernorm
     model->gelu_fusion = 0; //deviceProp.major >= 9 ? 2 : 0; // default: off for now (default must match main())
 }
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+void fill_in_q31_parameter_sizes(size_t* q31_param_sizes, GPT2Config config) {
+    // Mirror the full parameter layout, but only allocate elements for quantized weight tensors.
+    size_t Vp = config.padded_vocab_size;
+    size_t C = config.channels;
+    size_t maxT = config.max_seq_len;
+    size_t L = config.num_layers;
+    for (int i = 0; i < NUM_PARAMETER_TENSORS; i++) q31_param_sizes[i] = 0;
+    q31_param_sizes[0]  = Vp * C;            // wte
+    q31_param_sizes[1]  = maxT * C;          // wpe
+    q31_param_sizes[4]  = L * (3 * C) * C;   // qkvw
+    q31_param_sizes[6]  = L * C * C;         // attprojw
+    q31_param_sizes[10] = L * (4 * C) * C;   // fcw
+    q31_param_sizes[12] = L * C * (4 * C);   // fcprojw
+}
+
+void* malloc_and_point_q31_parameters(Q31ParameterTensors* params, size_t* param_elements) {
+    size_t num_parameters_bytes = 0;
+    for (int i = 0; i < NUM_PARAMETER_TENSORS; i++) {
+        num_parameters_bytes += param_elements[i] * sizeof(q131_t);
+    }
+    void* params_memory;
+    cudaCheck(cudaMalloc((void**)&params_memory, num_parameters_bytes));
+    q131_t** ptrs[] = {
+        &params->wte, &params->wpe, &params->ln1w, &params->ln1b, &params->qkvw, &params->qkvb,
+        &params->attprojw, &params->attprojb, &params->ln2w, &params->ln2b, &params->fcw, &params->fcb,
+        &params->fcprojw, &params->fcprojb, &params->lnfw, &params->lnfb
+    };
+    char* it = (char*)params_memory;
+    for (int i = 0; i < NUM_PARAMETER_TENSORS; i++) {
+        if (param_elements[i] == 0) {
+            *(ptrs[i]) = nullptr;
+        } else {
+            *(ptrs[i]) = (q131_t*)it;
+            it += param_elements[i] * sizeof(q131_t);
+        }
+    }
+    return params_memory;
+}
+
+ShardInfo gpt2_get_q31_tensor_at_layer(const GPT2 *model, int layer_id, int param_tensor_id) {
+    ptrdiff_t offset = 0;
+    for (int i = 0; i < param_tensor_id; i++) {
+        offset += (ptrdiff_t)model->q31_param_elements[i];
+    }
+    size_t size = model->q31_param_elements[param_tensor_id];
+    if (size == 0) {
+        return {0, 0};
+    }
+    if (2 <= param_tensor_id && param_tensor_id <= 13) {
+        size /= model->config.num_layers;
+        offset += (ptrdiff_t)(layer_id * size);
+    }
+    return {offset, size};
+}
+#endif
 
 void gpt2_allocate_weights(GPT2 *model) {
     // fill in all the parameter tensor dimensions and types
@@ -385,6 +571,19 @@ void gpt2_allocate_weights(GPT2 *model) {
     // create memory for model parameters on the device
     assert(model->params_memory == nullptr);
     model->params_memory = malloc_and_point_parameters(&model->params, model->param_elements, model->param_sizeof);
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // allocate canonical Q1.31 storage for selected weight tensors
+    fill_in_q31_parameter_sizes(model->q31_param_elements, model->config);
+    model->q31_num_parameters = 0;
+    model->q31_num_parameters_bytes = 0;
+    for (int i = 0; i < NUM_PARAMETER_TENSORS; i++) {
+        model->q31_num_parameters += model->q31_param_elements[i];
+        model->q31_num_parameters_bytes += model->q31_param_elements[i] * sizeof(q131_t);
+    }
+    assert(model->q31_params_memory == nullptr);
+    model->q31_params_memory = malloc_and_point_q31_parameters(&model->q31_params, model->q31_param_elements);
+#endif
 }
 
 void gpt2_allocate_state(GPT2 *model, int B, int T) {
@@ -451,8 +650,16 @@ void gpt2_allocate_state(GPT2 *model, int B, int T) {
 }
 
 void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_layers, int num_heads, int channels) {
-    // Initialize model with random Q1.15 weights (similar to train_gpt2.c)
+    // Initialize model with random weights
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    printf0("Initializing model with random weights + Q1.31 weight constraint (FIXED_POINT_Q31)\n");
+#elif defined(ENABLE_Q131)
+    printf0("Initializing model with random Q1.31 weights\n");
+#elif defined(ENABLE_Q115)
     printf0("Initializing model with random Q1.15 weights\n");
+#else
+    printf0("Initializing model with random weights\n");
+#endif
     
     // Set up model configuration
     model->config.max_seq_len = max_seq_len;
@@ -472,10 +679,9 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
     // Q1.31 has much higher precision than Q1.15, can use larger scales
     // Using initialization similar to standard neural network practice
     uint64_t seed = 12345;
-#if defined(ENABLE_Q131)
-    float init_scale = 0.02f; // Conservative but reasonable scale for Q1.31
-#else
-    float init_scale = 0.1f; // Conservative scale for Q1.15
+    float init_scale = 0.02f;
+#if defined(ENABLE_Q115)
+    init_scale = 0.1f;
 #endif
     
     // Allocate CPU memory for initialization
@@ -541,19 +747,11 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
         
         random_val *= tensor_scale;
         
-#if defined(ENABLE_Q131)
-        // Clamp to Q1.31 range [-1, 1) and convert
-        random_val = fmaxf(-1.0f, fminf(0.9999999f, random_val));
-        // For Q1.31: convert float to Q1.31 fixed-point format
-        // Q1.31 stores values in [-1, 1) as 32-bit signed integers
-        // Scale: multiply by 2^31 and store as int32
-        int32_t q131_val = (int32_t)(random_val * 2147483648.0);
-        params_memory_cpu[i] = q131_val;
-        
-        // Debug: print some sample values to verify conversion
-        if (i < 10) {
-            printf0("Debug init[%zu]: float=%f -> q131=%d\n", i, random_val, q131_val);
-        }
+#if defined(ENABLE_Q131) && !defined(FIXED_POINT_Q31)
+    // True Q1.31 mode: store fixed-point in params_memory directly
+    random_val = fmaxf(-1.0f, fminf(0.9999999f, random_val));
+    int32_t q131_val = (int32_t)(random_val * 2147483648.0);
+    params_memory_cpu[i] = q131_val;
 #elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
         // Clamp to Q1.15 range [-1, 1) for weight-constrained training
         random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
@@ -581,6 +779,24 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
     
     // Free CPU memory
     free(params_memory_cpu);
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // Canonicalize selected weights to Q1.31 and dequantize back into params.
+    for (int tensor_id = 0; tensor_id < NUM_PARAMETER_TENSORS; tensor_id++) {
+        if (!tensor_is_q31_weight(tensor_id)) continue;
+        ShardInfo tensor = gpt2_get_tensor_at_layer(model, 0, tensor_id);
+        ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, tensor_id);
+        assert(tensor.size == q31_tensor.size);
+        q131_t* q31_ptr = (q131_t*)model->q31_params_memory + q31_tensor.offset;
+        floatX* p_ptr = (floatX*)model->params_memory + tensor.offset;
+        int block = 512;
+        int grid = CEIL_DIV(tensor.size, block);
+        quantize_store_dequant_q31_kernel<<<dim3(grid, (tensor_id >= 2 && tensor_id <= 13) ? model->config.num_layers : 1), block, 0, main_stream>>>(
+            p_ptr, nullptr, q31_ptr, tensor.size, tensor.size, tensor.size);
+        cudaCheck(cudaGetLastError());
+    }
+    cudaCheck(cudaDeviceSynchronize());
+#endif
 }
 
 void gpt2_write_to_checkpoint(GPT2 *model, const char* checkpoint_path) {
@@ -592,7 +808,12 @@ void gpt2_write_to_checkpoint(GPT2 *model, const char* checkpoint_path) {
     memset(model_header, 0, sizeof(model_header));
     model_header[0] = 20240326; // magic number
     assert(PRECISION_MODE == PRECISION_FP32 || PRECISION_MODE == PRECISION_BF16 || PRECISION_MODE == PRECISION_Q131);
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // version 7: BF16/FP params with canonical Q1.31 storage for selected tensors (written tensor-by-tensor)
+    model_header[1] = 7;
+#else
     model_header[1] = (PRECISION_MODE == PRECISION_FP32) ? 3 : (PRECISION_MODE == PRECISION_Q131) ? 6 : 5; // version
+#endif
     model_header[2] = model->config.max_seq_len;
     model_header[3] = model->config.vocab_size;
     model_header[4] = model->config.num_layers;
@@ -601,8 +822,22 @@ void gpt2_write_to_checkpoint(GPT2 *model, const char* checkpoint_path) {
     model_header[7] = model->config.padded_vocab_size;
     fwriteCheck(model_header, sizeof(int), 256, model_file);
     // write the parameters
-    device_to_file(model_file, model->params_memory, model->num_parameters_bytes,
-                   IO_BUF_SIZE, main_stream);
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // tensor-by-tensor: Q31 for selected weights, floatX for everything else
+    for (int tensor_id = 0; tensor_id < NUM_PARAMETER_TENSORS; tensor_id++) {
+        if (tensor_is_q31_weight(tensor_id)) {
+            ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, tensor_id);
+            size_t bytes = q31_tensor.size * sizeof(q131_t);
+            device_to_file(model_file, (q131_t*)model->q31_params_memory + q31_tensor.offset, bytes, IO_BUF_SIZE, main_stream);
+        } else {
+            ShardInfo tensor = gpt2_get_tensor_at_layer(model, 0, tensor_id);
+            size_t bytes = tensor.size * sizeof(floatX);
+            device_to_file(model_file, (floatX*)model->params_memory + tensor.offset, bytes, IO_BUF_SIZE, main_stream);
+        }
+    }
+#else
+    device_to_file(model_file, model->params_memory, model->num_parameters_bytes, IO_BUF_SIZE, main_stream);
+#endif
     // close file, we're done
     fcloseCheck(model_file);
 }
@@ -657,7 +892,11 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
     }
     
     int version = model_header[1];
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    if (!(version == 3 || version == 5 || version == 7)) {
+#else
     if (!(version == 3 || version == 5)) {
+#endif
         // 3 = fp32, padded vocab
         // 5 = bf16, padded vocab, layernorms also in bf16
         fprintf(stderr, "Bad version in model file: %d\n", version);
@@ -668,28 +907,37 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
         return;
     }
 
-    // check if the precision mode of the checkpoing matches the model precision
+    // check if the precision mode of the checkpoint matches the model precision
     if (weight_init) {
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+        if (PRECISION_MODE == PRECISION_BF16 && !(version == 5 || version == 7)) {
+#else
         if (PRECISION_MODE == PRECISION_BF16 && version != 5) {
+#endif
             fprintf(stderr, "Precision is configured as BF16 but model at %s is not.\n", checkpoint_path);
             fprintf(stderr, "---> HINT: are you sure you're loading a _bf16.bin file?\n");
             exit(EXIT_FAILURE);
         }
-        if (PRECISION_MODE == PRECISION_FP32 && version != 3) {
+        if (PRECISION_MODE == PRECISION_FP32 && !(version == 3
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+            || version == 7
+#endif
+            )) {
             fprintf(stderr, "Precision is configured as FP32 but model at %s is not.\n", checkpoint_path);
             fprintf(stderr, "---> HINT: to turn on FP32 you have to compile like: `make train_gpt2cu PRECISION=FP32`\n");
             fprintf(stderr, "---> HINT: are you sure you're loading a .bin file without any _bf16 in the name?\n");
             exit(EXIT_FAILURE);
         }
+#if !defined(FIXED_POINT_Q31)
         if ((PRECISION_MODE == PRECISION_Q115 || PRECISION_MODE == PRECISION_Q131) && !(version == 3 || version == 5)) {
             fprintf(stderr, "Precision is configured as Q1.15/Q1.31 but checkpoint version %d is not supported.\n", version);
             fprintf(stderr, "---> HINT: Q1.15/Q1.31 training uses random initialization, not checkpoint loading\n");
             fprintf(stderr, "---> Falling back to random initialization...\n");
             fclose(model_file);
-            printf0("Initializing random Q1.31 weights\n");
             gpt2_init_random(model, 1024, 50257, 12, 12, 768);
             return;
         }
+#endif
     }
 
     // read in hyperparameters
@@ -706,12 +954,68 @@ void gpt2_build_from_checkpoint(GPT2 *model, const char* checkpoint_path, bool w
     // read in the parameters if weight_init is true
     if (weight_init) {
         assert(model->params_memory != NULL);
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+        if (version == 7) {
+            // tensor-by-tensor: Q31 for selected weights, floatX for everything else
+            for (int tensor_id = 0; tensor_id < NUM_PARAMETER_TENSORS; tensor_id++) {
+                if (tensor_is_q31_weight(tensor_id)) {
+                    ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, tensor_id);
+                    size_t bytes = q31_tensor.size * sizeof(q131_t);
+                    file_to_device((q131_t*)model->q31_params_memory + q31_tensor.offset, model_file, bytes, IO_BUF_SIZE, main_stream);
+                } else {
+                    ShardInfo tensor = gpt2_get_tensor_at_layer(model, 0, tensor_id);
+                    size_t bytes = tensor.size * sizeof(floatX);
+                    file_to_device((floatX*)model->params_memory + tensor.offset, model_file, bytes, IO_BUF_SIZE, main_stream);
+                }
+            }
+        } else {
+            // load bf16/fp32 weights then quantize selected tensors to Q1.31
+            file_to_device(model->params_memory, model_file, model->num_parameters_bytes, IO_BUF_SIZE, main_stream);
+        }
+#else
         file_to_device(model->params_memory, model_file, model->num_parameters_bytes, IO_BUF_SIZE, main_stream);
+#endif
     }
     fcloseCheck(model_file);
 
     // only return from this function once we are certain the params are ready on the GPU
     cudaCheck(cudaDeviceSynchronize());
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    if (weight_init && version != 7) {
+        // Canonicalize selected weights to Q1.31 and dequantize back into params.
+        for (int tensor_id = 0; tensor_id < NUM_PARAMETER_TENSORS; tensor_id++) {
+            if (!tensor_is_q31_weight(tensor_id)) continue;
+            ShardInfo tensor = gpt2_get_tensor_at_layer(model, 0, tensor_id);
+            ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, tensor_id);
+            assert(tensor.size == q31_tensor.size);
+            q131_t* q31_ptr = (q131_t*)model->q31_params_memory + q31_tensor.offset;
+            floatX* p_ptr = (floatX*)model->params_memory + tensor.offset;
+            int block = 512;
+            int grid = CEIL_DIV(tensor.size, block);
+            quantize_store_dequant_q31_kernel<<<dim3(grid, (tensor_id >= 2 && tensor_id <= 13) ? model->config.num_layers : 1), block, 0, main_stream>>>(
+                p_ptr, nullptr, q31_ptr, tensor.size, tensor.size, tensor.size);
+            cudaCheck(cudaGetLastError());
+        }
+        cudaCheck(cudaDeviceSynchronize());
+    } else if (weight_init && version == 7) {
+        // Dequantize Q31 weights into float params.
+        for (int tensor_id = 0; tensor_id < NUM_PARAMETER_TENSORS; tensor_id++) {
+            if (!tensor_is_q31_weight(tensor_id)) continue;
+            ShardInfo tensor = gpt2_get_tensor_at_layer(model, 0, tensor_id);
+            ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, tensor_id);
+            assert(tensor.size == q31_tensor.size);
+            const q131_t* q31_ptr = (const q131_t*)model->q31_params_memory + q31_tensor.offset;
+            floatX* p_ptr = (floatX*)model->params_memory + tensor.offset;
+            int block = 512;
+            int grid = CEIL_DIV(tensor.size, block);
+            dequant_q31_to_params_kernel<<<dim3(grid, (tensor_id >= 2 && tensor_id <= 13) ? model->config.num_layers : 1), block, 0, main_stream>>>(
+                p_ptr, nullptr, q31_ptr, tensor.size, tensor.size, tensor.size);
+            cudaCheck(cudaGetLastError());
+        }
+        cudaCheck(cudaDeviceSynchronize());
+    }
+#endif
 }
 
 void gpt2_set_hyperparameters(GPT2Config* config, const char* depth_str) {
@@ -1341,6 +1645,27 @@ void gpt2_update(GPT2 *model, float learning_rate, float beta1, float beta2, flo
             // This ensures weights never exceed Q1.15 representable range while computation is in bf16
             clamp_weights_q115(param_ptr, master_ptr, shard.size, tensor.size, shard.size, num_layers, main_stream);
 #endif
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+            // Q1.31 weight-constraint mode (approach 1):
+            // Apply updates in FP32 (master weights), then requantize to canonical Q1.31 once per *step*.
+            if (tensor_is_q31_weight(i)) {
+                ShardInfo q31_tensor = gpt2_get_q31_tensor_at_layer(model, 0, i);
+                ShardInfo q31_shard = multi_gpu_get_shard_offset(q31_tensor.size, multi_gpu_config, 1);
+                // Expect identical sharding size for float params vs q31 params
+                if (q31_shard.size != shard.size) {
+                    fprintf(stderr, "Q31 shard size mismatch on tensor %d: %zu vs %zu\n", i, q31_shard.size, shard.size);
+                    exit(EXIT_FAILURE);
+                }
+                ptrdiff_t q31_local_offset_full = q31_tensor.offset + q31_shard.offset;
+                q131_t* q31_ptr = (q131_t*)model->q31_params_memory + q31_local_offset_full;
+                int block = 512;
+                int grid = CEIL_DIV(shard.size, block);
+                quantize_store_dequant_q31_kernel<<<dim3(grid, num_layers), block, 0, main_stream>>>(
+                    param_ptr, master_ptr, q31_ptr, shard.size, tensor.size, shard.size);
+                cudaCheck(cudaGetLastError());
+            }
+#endif
         }
 
         if (multi_gpu_config->zero_stage == 1) {
@@ -1400,6 +1725,9 @@ void gpt2_free(GPT2 *model) {
     cudaFreeCheck(&model->inputs);
     cudaFreeCheck(&model->targets);
     cudaFreeCheck(&model->accumulated_mean_loss);
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    cudaFreeCheck(&model->q31_params_memory);
+#endif
     cudaCheck(cudaFreeHost(model->cpu_losses));
     free(model->workload_indices);
     free(model->bucket_info);
@@ -1882,6 +2210,18 @@ int main(int argc, char *argv[]) {
     printf0("| num_parameters        | %-50zu |\n", model.num_parameters);
     printf0("+-----------------------+----------------------------------------------------+\n");
 
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    // Diagnostics buffers (device)
+    double* d_logit_sum = nullptr;
+    double* d_logit_sumsq = nullptr;
+    unsigned int* d_q31_max_abs = nullptr;
+    unsigned long long* d_q31_low16_nz = nullptr;
+    cudaCheck(cudaMalloc((void**)&d_logit_sum, sizeof(double)));
+    cudaCheck(cudaMalloc((void**)&d_logit_sumsq, sizeof(double)));
+    cudaCheck(cudaMalloc((void**)&d_q31_max_abs, sizeof(unsigned int)));
+    cudaCheck(cudaMalloc((void**)&d_q31_low16_nz, sizeof(unsigned long long)));
+#endif
+
     // build DataLoaders for both train and val
     int permute_train_loader = (overfit_single_batch == 1) ? 0 : 1;
     DataLoader train_loader, val_loader;
@@ -1895,6 +2235,9 @@ int main(int argc, char *argv[]) {
         // the number of (outer loop) steps each process should take for us to reach one epoch
         train_num_batches = ntok / total_batch_size;
     }
+
+    float best_loss = INFINITY;
+    int mid_training_step = train_num_batches / 2;
     // figure out the number of validation steps to run for
     int val_num_batches = val_max_steps; // passed in from command line
     if (val_num_batches == -1) {
@@ -2109,12 +2452,31 @@ int main(int argc, char *argv[]) {
         }
         // do one training step, doing forward/backward/update on total_batch_size tokens
         cudaCheck(cudaEventRecord(start));
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+        // reset per-step diagnostics accumulators
+        cudaCheck(cudaMemsetAsync(d_logit_sum, 0, sizeof(double), main_stream));
+        cudaCheck(cudaMemsetAsync(d_logit_sumsq, 0, sizeof(double), main_stream));
+#endif
         // gradient and loss accumulation loop over micro-batches
         for (int micro_step = 0; micro_step < grad_accum_steps; micro_step++) {
             // fetch the next data batch
             dataloader_next_batch(&train_loader);
             // forward pass. note that we pass in grad_accum_steps, which scales down the loss
             gpt2_forward(&model, train_loader.inputs, B, T);
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+            // Per-step logit stddev: collect sums on the final micro-step before backward overwrites logits.
+            if (micro_step == grad_accum_steps - 1) {
+                size_t N = (size_t)B * (size_t)T * (size_t)model.config.padded_vocab_size;
+                int block = 256;
+                size_t grid_sz = CEIL_DIV(N, (size_t)block);
+                if (grid_sz > 1024) grid_sz = 1024;
+                int grid = (int)grid_sz;
+                sum_sumsq_kernel<<<grid, block, 0, main_stream>>>((const floatX*)model.acts.output, N, d_logit_sum, d_logit_sumsq);
+                cudaCheck(cudaGetLastError());
+            }
+#endif
             // backward pass. all model params accumulate gradients with += inside this inner loop
             gpt2_backward_and_reduce(&model, train_loader.inputs, train_loader.targets, grad_accum_steps, micro_step);
         }
@@ -2147,6 +2509,55 @@ int main(int argc, char *argv[]) {
         cudaCheck(cudaEventSynchronize(end)); // wait for the end event to finish to get correct timings
         // --------------- TRAINING SECTION END -------------------
         // everything that follows now is just diagnostics, prints, logging, etc.
+
+        // Track best loss and apply a mid-training safety check
+        if (isfinite(model.mean_loss)) {
+            best_loss = fminf(best_loss, model.mean_loss);
+        }
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+        // Print per-step logit stddev (computed from final micro-step logits)
+        double h_sum = 0.0, h_sumsq = 0.0;
+        cudaCheck(cudaMemcpy(&h_sum, d_logit_sum, sizeof(double), cudaMemcpyDeviceToHost));
+        cudaCheck(cudaMemcpy(&h_sumsq, d_logit_sumsq, sizeof(double), cudaMemcpyDeviceToHost));
+        size_t N = (size_t)B * (size_t)T * (size_t)model.config.padded_vocab_size;
+        double mean = h_sum / (double)N;
+        double var = h_sumsq / (double)N - mean * mean;
+        double std = sqrt(var > 0.0 ? var : 0.0);
+        printf0("Q31 diag | step %d | logits_std %.6f\n", step + 1, (float)std);
+
+        // Periodic Q31 weight validation (prevents accidental Q1.15-shifted storage)
+        if ((step % 50) == 0) {
+            cudaCheck(cudaMemsetAsync(d_q31_max_abs, 0, sizeof(unsigned int), main_stream));
+            cudaCheck(cudaMemsetAsync(d_q31_low16_nz, 0, sizeof(unsigned long long), main_stream));
+            const q131_t* w = (const q131_t*)model.q31_params.fcw;
+            size_t wn = model.q31_param_elements[10];
+            int block = 256;
+            size_t grid_sz = CEIL_DIV(wn, (size_t)block);
+            if (grid_sz > 1024) grid_sz = 1024;
+            int grid = (int)grid_sz;
+            q31_stats_kernel<<<grid, block, 0, main_stream>>>(w, wn, d_q31_max_abs, d_q31_low16_nz);
+            cudaCheck(cudaGetLastError());
+            cudaCheck(cudaDeviceSynchronize());
+            unsigned int max_abs = 0;
+            unsigned long long low16_nz = 0;
+            cudaCheck(cudaMemcpy(&max_abs, d_q31_max_abs, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+            cudaCheck(cudaMemcpy(&low16_nz, d_q31_low16_nz, sizeof(unsigned long long), cudaMemcpyDeviceToHost));
+            if (max_abs <= (1u << 15)) {
+                fprintf(stderr, "ERROR: Q31 weights look truncated (max_abs=%u <= 2^15).\n", max_abs);
+                exit(EXIT_FAILURE);
+            }
+            if (low16_nz == 0ULL) {
+                fprintf(stderr, "ERROR: Q31 weights look Q15-shifted (all low16 bits zero).\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (step > mid_training_step && best_loss > 7.0f) {
+            fprintf(stderr, "ERROR: loss did not drop below 7.0 by mid-training (best_loss=%f).\n", best_loss);
+            exit(EXIT_FAILURE);
+        }
+#endif
 
         // todo - move or double-buffer all of this timing logic to avoid idling the GPU at this point!
         float time_elapsed_ms;
@@ -2183,6 +2594,13 @@ int main(int argc, char *argv[]) {
     cudaCheck(cudaEventDestroy(start));
     if (run_hellaswag) { evalloader_free(&eval_loader); }
     dataloader_free(&train_loader);
+
+#if defined(ENABLE_Q131) && defined(FIXED_POINT_Q31)
+    cudaFreeCheck(&d_logit_sum);
+    cudaFreeCheck(&d_logit_sumsq);
+    cudaFreeCheck(&d_q31_max_abs);
+    cudaFreeCheck(&d_q31_low16_nz);
+#endif
     dataloader_free(&val_loader);
     tokenizer_free(&tokenizer);
     free(cpu_logits_raw);

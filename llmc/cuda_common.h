@@ -108,8 +108,10 @@ typedef half floatX;
 #include <stdint.h>
 typedef int16_t floatX; // Q1.15 represented as int16_t
 #define PRECISION_MODE PRECISION_Q115
-#elif defined(ENABLE_Q131)
+#elif defined(ENABLE_Q131) && !defined(FIXED_POINT_Q31)
 // Q1.31 fixed-point mode (32-bit) - higher precision than Q1.15
+// NOTE: This mode stores activations as Q1.31 and is NOT compatible with cuBLASLt matmul.
+// Use FIXED_POINT_Q31 to enable Q1.31 weight-constraint mode with BF16/FP activations.
 #include <stdint.h>
 typedef int32_t floatX; // Q1.31 represented as int32_t
 #define PRECISION_MODE PRECISION_Q131

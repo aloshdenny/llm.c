@@ -154,8 +154,8 @@ __device__ SoftmaxParams prepare_softmax_blockwide3(int64_t idx, const floatX* i
     float thread_sumval = 0.0f;
     int i = (V+x128::size-1)/x128::size + threadIdx.x - blockDim.x;
 
-#if defined(ENABLE_Q131)
-    // For Q1.31 mode: scale logits to expand dynamic range
+#if defined(ENABLE_Q131) && !defined(FIXED_POINT_Q31)
+    // For true Q1.31-logits mode: scale logits to expand dynamic range
     const float logit_scale = Q131_LOGIT_SCALE;
 #elif defined(ENABLE_Q115)
     // For Q1.15 mode: scale logits to expand dynamic range
@@ -216,8 +216,8 @@ __global__ void __launch_bounds__(1024, MAX_1024_THREADS_BLOCKS)
     int64_t idx = gridDim.x - (blockIdx.x+1); // reverse order for cache hits on matmul data
     int ix = targets[idx];
 
-#if defined(ENABLE_Q131)
-    // For Q1.31 mode: scale logits to expand dynamic range
+#if defined(ENABLE_Q131) && !defined(FIXED_POINT_Q31)
+    // For true Q1.31-logits mode: scale logits to expand dynamic range
     const float logit_scale = Q131_LOGIT_SCALE;
 #elif defined(ENABLE_Q115)
     // For Q1.15 mode: scale logits to expand dynamic range
