@@ -540,19 +540,24 @@ void gpt2_init_random(GPT2 *model, int max_seq_len, int vocab_size, int num_laye
 #if defined(ENABLE_Q131)
         // Clamp to Q1.31 range [-1, 1) and convert
         random_val = fmaxf(-1.0f, fminf(0.9999999995f, random_val));
-#elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
-        // Clamp to Q1.15 range [-1, 1) for weight-constrained training
-        random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
-#endif
-        
-#if defined(ENABLE_Q131)
         // For Q1.31: convert float to Q1.31 fixed-point format
         // Q1.31 stores values in [-1, 1) as 32-bit signed integers
         // Scale: multiply by 2^31 and store as int32
         double clamped = fmax(-1.0, fmin(0.9999999995, (double)random_val));
         int32_t q131_val = (int32_t)(clamped * 2147483648.0);
         params_memory_cpu[i] = q131_val;
-#elif PRECISION_MODE == PRECISION_FP32
+#elif defined(ENABLE_Q115_WEIGHT_CONSTRAINT)
+        // Clamp to Q1.15 range [-1, 1) for weight-constrained training
+        random_val = fmaxf(-1.0f, fminf(0.999969482421875f, random_val));
+        #if PRECISION_MODE == PRECISION_FP32
+            params_memory_cpu[i] = random_val;
+        #elif PRECISION_MODE == PRECISION_BF16
+            params_memory_cpu[i] = (floatX)random_val;
+        #else
+            params_memory_cpu[i] = (floatX)random_val;
+        #endif
+#else
+        #if PRECISION_MODE == PRECISION_FP32
             params_memory_cpu[i] = random_val;
         #elif PRECISION_MODE == PRECISION_BF16
             params_memory_cpu[i] = (floatX)random_val;
