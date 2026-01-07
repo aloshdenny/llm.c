@@ -89,7 +89,7 @@ typedef Packed128<floatX> x128;
 
 // enumerator to indentify the datatype of a tensor.
 enum class DType : uint8_t {
-    FP32, FP16, BF16, Q115
+    FP32, FP16, BF16, Q115, Q131
 };
 
 // Given a datatype enum, returns the underlying number of bytes
@@ -104,6 +104,8 @@ size_t sizeof_dtype(DType type) {
             return sizeof(nv_bfloat16);
         case DType::Q115:
             return sizeof(int16_t);
+        case DType::Q131:
+            return sizeof(int32_t);
         default: // handle or get compiler warning
             fprintf(stderr, "Unknown datatype\n");
             exit(EXIT_FAILURE);
@@ -114,6 +116,7 @@ DType dtype_of(float* f) { return DType::FP32; }
 DType dtype_of(nv_bfloat16 * f) { return DType::BF16; }
 DType dtype_of(half * f) { return DType::FP16; }
 DType dtype_of(int16_t * f) { return DType::Q115; }
+DType dtype_of(int32_t * f) { return DType::Q131; }
 
 
 
