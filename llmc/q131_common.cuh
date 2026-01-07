@@ -22,6 +22,9 @@ __device__ __forceinline__ float q131_to_float(q131_t v) {
     return (float)((double)v / Q131_SCALE_D);
 }
 
+// Forward declaration (some kernels use float_to_q131(), which aliases to this).
+__device__ __forceinline__ q131_t float_to_q131_rne(float x);
+
 // Historical name used in kernels.
 __device__ __forceinline__ q131_t float_to_q131(float x) {
     return float_to_q131_rne(x);
